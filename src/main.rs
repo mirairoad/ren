@@ -1,0 +1,184 @@
+mod buffer;
+mod config;
+mod containers;
+mod dap;
+mod editor;
+mod fileops;
+mod git;
+mod highlight;
+mod icons;
+mod lsp;
+mod render;
+mod screen;
+mod settings;
+mod term;
+mod tools;
+mod tree;
+
+use crossterm::cursor::{SetCursorStyle, Show};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::execute;
+use crossterm::terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen};
+use editor::Editor;
+use screen::Screen;
+use std::io::{self, BufWriter, Write};
+use std::time::Duration;
+
+fn setup() -> io::Result<()> {
+    terminal::enable_raw_mode()?;
+    let mut out = io::stdout();
+    execute!(out, EnterAlternateScreen, EnableMouseCapture, DisableLineWrap)?;
+    let _ = execute!(out, EnableBracketedPaste);
+    // The kitty keyboard protocol lets Ctrl+Esc and Ctrl+` arrive as their own keys.
+    if std::env::var_os("REN_NO_KITTY").is_none() && terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+        if execute!(out, PushKeyboardEnhancementFlags(flags)).is_ok() {
+            editor::KITTY.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
+fn restore() {
+    let mut out = io::stdout();
+    if editor::kitty() {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
+    let _ = execute!(out, DisableBracketedPaste);
+    let _ = execute!(
+        out,
+        DisableMouseCapture,
+        EnableLineWrap,
+        SetCursorStyle::DefaultUserShape,
+        Show,
+        LeaveAlternateScreen
+    );
+    let _ = terminal::disable_raw_mode();
+    let _ = out.flush();
+}
+
+fn run(ed: &mut Editor) -> io::Result<()> {
+    let mut out = BufWriter::with_capacity(1 << 16, io::stdout());
+    let mut screen = Screen::new(ed.w, ed.h);
+    let mut redraw = true;
+    loop {
+        if redraw {
+            screen.resize(ed.w, ed.h);
+            ed.draw(&mut screen);
+            screen.flush(&mut out, ed.cursor_pos(), ed.bar_cursor())?;
+            redraw = false;
+        }
+        if ed.quit {
+            return Ok(());
+        }
+        if event::poll(Duration::from_millis(20))? {
+            let ev = event::read()?;
+            ed.burst = event::poll(Duration::ZERO)?;
+            ed.handle(ev);
+            while !ed.quit && event::poll(Duration::ZERO)? {
+                let ev = event::read()?;
+                ed.burst = true;
+                ed.handle(ev);
+            }
+            ed.burst = false;
+            redraw = true;
+        }
+        if ed.lsp_tick() {
+            redraw = true;
+        }
+        if ed.debug_tick() {
+            redraw = true;
+        }
+        if ed.panel_tick() {
+            redraw = true;
+        }
+        if ed.git_tick() {
+            redraw = true;
+        }
+        ed.autosave_tick();
+    }
+}
+
+fn main() -> io::Result<()> {
+    screen::detect_colors();
+    let arg = std::env::args().nth(1);
+    match arg.as_deref() {
+        Some("-h") | Some("--help") => {
+            println!("ren {}", env!("CARGO_PKG_VERSION"));
+            println!("usage: ren [file | folder]");
+            println!("       ren --init   create ~/.ren/settings.json if missing");
+            println!("Type :help inside the editor for all shortcuts.");
+            return Ok(());
+        }
+        Some("--init") => {
+            match settings::ensure() {
+                Ok(Some(p)) => println!("created {}", p.display()),
+                Ok(None) => {
+                    if let Some(p) = settings::path() {
+                        println!("settings already exist: {}", p.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("could not create settings: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Some("--session") => {
+            let root = std::env::args().nth(2);
+            let (w, h) = terminal::size()?;
+            let mut ed = Editor::new(root, w, h);
+            ed.restore_session();
+            return run_app(ed);
+        }
+        Some("-V") | Some("--version") => {
+            println!("ren {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
+    let (w, h) = terminal::size()?;
+    let mut ed = Editor::new(arg, w, h);
+    ed.check_recovery();
+    run_app(ed)
+}
+
+fn run_app(mut ed: Editor) -> io::Result<()> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
+        default_hook(info);
+    }));
+
+    setup()?;
+    let res = run(&mut ed);
+    ed.lsp.stop_all();
+    ed.clean_exit();
+    restore();
+    if ed.reload && res.is_ok() {
+        return restart(&ed.tree.root);
+    }
+    res
+}
+
+/// `:reload`: replaces this process with a fresh ren that restores the session.
+fn restart(root: &std::path::Path) -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--session").arg(root);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let e = cmd.exec();
+        Err(e)
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd.status()?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
+}

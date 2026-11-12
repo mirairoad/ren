@@ -1,0 +1,130 @@
+ren — help                                                   (:q closes this tab)
+
+MODES
+  Edit       type straight into the file (always)
+  Command    the : line, typed into the bar at the bottom (after the COMMAND badge)
+  Ctrl+Esc   swap between Edit and Command (from anywhere)
+  Esc        in Edit: closes the completion popup, hover, selection, find bar.
+             Without the kitty keyboard protocol (e.g. Terminal.app, tmux) Ctrl+Esc
+             arrives as plain Esc, so Esc opens the : line once nothing is left to close.
+  In Command: Enter runs, Esc cancels, ↑/↓ history. Tab completes commands, their
+  words and paths; with several matches a list opens (Tab / Shift+Tab / ↑↓ step,
+  Esc closes it). Relative paths start from the tree's selected folder (or the
+  open file's folder); the list shows which, e.g. "in /src/". /x = workspace root.
+
+EDITING
+  arrows, Home/End, PgUp/PgDn      move (Home toggles first non-blank / column 0)
+  Ctrl/Alt+←/→                     word left / right
+  Ctrl+Home / Ctrl+End             start / end of file
+  Shift + any movement             select
+  Ctrl+A                           select all
+  mouse                            click, drag to select, double click word, triple click line,
+                                   Shift+click extends, Ctrl+click goes to definition
+  Ctrl+C / Ctrl+X / Ctrl+V         copy / cut / paste (no selection = the whole line)
+  Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z)   undo / redo
+  Tab / Shift+Tab                  indent / outdent (the selected lines)
+  Ctrl+Backspace / Ctrl+Delete     delete word left / right
+  Ctrl+S                           save (formats first when formatOnSave is on)
+  Ctrl+F / Ctrl+H                  find / find and replace
+  Ctrl+G                           : line (type a line number to jump there)
+  Ctrl+PgUp / Ctrl+PgDn            previous / next tab
+
+TABS AND WINDOWS
+  Ctrl+B          show / hide the side panel (file tree, or git with :git)
+  Ctrl+W          cycle focus: editor → side panel → bottom panel
+  Ctrl+`          bottom panel: Terminal | Debug | Containers (needs kitty keys; or :panel)
+  Ctrl+K          open a folder
+  :q  :q!         close the tab (:q! drops unsaved changes; quits on the last tab)
+  :w  :wq  :x     save / save and close the tab (:w <path> saves as)
+  tab ×           hover a tab: its icon turns into ×; click it (or middle-click the
+                  tab) to close. Unsaved: opens : for q! (discard) or wq (save)
+  :qa :qa!        quit
+  :reload         restart ren and come back to the same place (unsaved text is kept)
+  :recover        reopen unsaved tabs left by a session that crashed (:recover discard)
+
+FILE TREE
+  ↑/↓ PgUp/PgDn Home/End   move
+  Space        preview the file (italic tab, focus stays in the tree; the next
+               preview replaces it, editing it makes it a normal tab)
+  Enter        open the file as a normal tab and edit it / open or close a folder
+  →  ←         open folder / close folder or go to parent
+  letter       jump to the next entry starting with it
+  Delete / F2  prefill :rm / :mv for the selected entry
+  Ctrl+Z / Ctrl+Y   undo / redo the last file command (from .bin)
+
+FILE COMMANDS (paths: /x = workspace root, ~/x = home, ../ walks out, anything else is
+relative to the folder you're in: the tree selection, or the active file's folder.
+Quotes are only needed for spaces: :touch "/src/my file.rs")
+  :touch <path>…        create empty files and missing folders (existing: update time)
+  :mkfile <path>…       same as :touch
+  :mkdir <path>…        create folders (with parents)
+  :cp <src>… <dst>      copy (into <dst> when it's a folder; folders recursively)
+  :mv <src>… <dst>      move / rename (open tabs follow)
+  :duplicate <path>…    copy next to it as name_copy.ext
+  :rm <path>…           move to .bin (never deleted)
+  :bin                  what's in .bin · :bin empty · :bin undo · :bin redo
+  Anything :cp/:mv would overwrite goes to .bin too. The history is kept in
+  .bin/index.json (100 steps), so undo works after a restart.
+  :open <path>  :cd <dir>  :pwd  :save <path> (save as)  :revert (reload from disk)
+  :!<cmd>               run a shell command, output in a tab (% = current file)
+
+GIT (:git shows the git panel in place of the tree; :git or Esc goes back)
+  ↑/↓          select a file; its diff shows side by side in the editor area
+  Space        tick / untick: stage / unstage the file (on a header: the whole section)
+  Enter        open the real file
+  → or Tab     into the diff:  ↑/↓ move, Shift+↑/↓ select lines,
+               Space stages (or unstages) the selected lines / the block under the cursor
+  click the branch name for the branch list; ✓ Commit ↑ Push ↓ Pull ⊟ Stash buttons
+  :git init                     git init + a .gitignore (.bin/, OS/editor files, .env, logs, language)
+  :git add <path>  :git reset <path>
+  :git commit                   the commit form (templates from settings)
+  :git commit <message>         quick commit
+  :git push  :git pull          in the background (push sets the upstream the first time)
+  :git stash [list|pop|apply|drop [ref]]
+  :git branch [name]            branch list, or create a branch
+  :git checkout [-b] <name>     switch (or create and switch); refuses with unsaved tabs
+  Commit form: Tab/↑↓ fields, ◂▸ choices, Ctrl+T next template, Ctrl+S commit, Esc cancel
+
+BOTTOM PANEL (Ctrl+` or :panel; Ctrl+PgUp/PgDn switch tabs while it has focus)
+  It sits under the editor; the file tree / git panel keeps its full height.
+  Terminal     :terminal  :terminal new [cmd]  :terminal close
+               + opens a terminal; hover a terminal tab and click its × (or middle-click
+               the tab) to kill it. Closing the last one hides the panel.
+               keys go to the shell; Shift+PgUp/PgDn scroll back; Ctrl+↑ back to the editor
+  Debug        the debugger (below)
+  Containers   :containers [start|stop|restart|shell|refresh]
+               ↑/↓ select (logs follow on the right), Enter opens a shell in the terminal
+               socket: "containers": { "socket": "unix:///…" } in :settings
+
+LANGUAGE SERVER (LSP) — starts automatically; the project's .venv / node_modules/.bin
+first, then PATH. Several servers per language via "lsp.servers" in settings.
+  Ctrl+Space   completion (Tab / Enter accepts)
+  F1           hover documentation (or the value of a variable while debugging)
+  F12 / Ctrl+click   go to definition       Shift+F12   references
+  Ctrl+O       jump back                     F2          rename symbol
+  Ctrl+.       code actions (from every server)
+  Ctrl+Shift+O document symbols              Ctrl+T      workspace symbols
+  F8 / Shift+F8  next / previous diagnostic
+  Inlay hints: types and parameter names in dim italics (not part of the file).
+  :format :diag :actions :def :refs :symbols :wsymbols :hover :rename <name>
+  :lsp  :lsp restart  :lsp stop
+
+DEBUGGER (DAP)
+  F5           start / continue (asks which .vscode/launch.json configuration first)
+  Shift+F5     stop                Ctrl+Shift+F5   restart
+  F9 or click the gutter   toggle breakpoint
+  F10 / F11 / Shift+F11    step over / into / out          F6   pause
+  :debug config            pick the launch.json configuration (also the header "config ▾")
+  :debug [program args]    :debug args …  :debug program …  :debug stop|restart
+  :watch <expr>  :unwatch [n]  :break  :breakclear
+  :install [codelldb|debugpy|delve]   :uninstall <name>
+  Python runs with the project's .venv interpreter.
+
+SETTINGS
+  :settings            ~/.ren/settings.json (global)
+  :settings project    <project>/.ren/settings.json (merged over the global file)
+  :icons               toggle file-type icons for this session ("icons" in settings)
+  :hints               inlay hints menu: Enter switches a kind on/off for this session
+  :hints on|off|types|params|returns|chaining|braces   the same from the command line
+                       (keep it with "inlayHints" in settings)
+  Saving a settings file inside ren applies it immediately.

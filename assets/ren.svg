@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- ren. — 錬 (to refine, to temper metal). Ember gradient, "r." mark. -->
+  <defs>
+    <linearGradient id="bg" x1="0.12" y1="0.08" x2="0.95" y2="1">
+      <stop offset="0" stop-color="#fffaf6"/>
+      <stop offset="0.4" stop-color="#ffc9a8"/>
+      <stop offset="1" stop-color="#ff5a24"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="22"/>
+      <feOffset dx="0" dy="18" result="b"/>
+      <feFlood flood-color="#7a2a10" flood-opacity="0.28"/>
+      <feComposite in2="b" operator="in"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#bg)"/>
+  <g filter="url(#shadow)">
+    <path d="M404 628 V444 M404 540 C404 478 448 444 512 444 H560"
+          fill="none" stroke="#5c1d0c" stroke-width="76"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="666" cy="626" r="44" fill="#ffffff"/>
+  </g>
+</svg>
