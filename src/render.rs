@@ -14,10 +14,10 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
 
 pub(crate) const DIM: Color = rgb(0x5c, 0x63, 0x70);
 pub(crate) const BRIGHT: Color = rgb(0xe6, 0xe6, 0xe6);
-const KW: Color = rgb(0xc6, 0x78, 0xdd);
+pub(crate) const KW: Color = rgb(0xc6, 0x78, 0xdd);
 pub(crate) const STR: Color = rgb(0x98, 0xc3, 0x79);
-const NUM: Color = rgb(0xd1, 0x9a, 0x66);
-const FUNC: Color = rgb(0x61, 0xaf, 0xef);
+pub(crate) const NUM: Color = rgb(0xd1, 0x9a, 0x66);
+pub(crate) const FUNC: Color = rgb(0x61, 0xaf, 0xef);
 pub(crate) const TYPE: Color = rgb(0xe5, 0xc0, 0x7b);
 pub(crate) const MACRO: Color = rgb(0x56, 0xb6, 0xc2);
 const ESC: Color = rgb(0x56, 0xb6, 0xc2);
@@ -215,6 +215,10 @@ pub(crate) fn tok_style(t: Tok) -> Style {
         // Quotes (and prefixes like r#, f, b) are string-coloured; placeholders read as code.
         Tok::Quote => Style::fg(STR),
         Tok::Interp => Style::new(),
+        Tok::Heading => Style::fg(KW).bold(),
+        Tok::Strong => Style::new().bold(),
+        Tok::Emph => Style::new().italic(),
+        Tok::Url => Style::fg(FUNC).underline(FUNC),
     }
 }
 
@@ -263,6 +267,7 @@ impl Editor {
             _ if self.focus == Focus::Panel => self.dbg_cursor.get(),
             _ if self.focus == Focus::Tree => None,
             _ if self.is_splash() => None,
+            _ if self.buf().md_view => None,
             _ => {
                 let l = self.layout();
                 let b = self.buf();
@@ -565,7 +570,41 @@ impl Editor {
         }
     }
 
+    /// The tab's Markdown rendered (`markdown.rs`), from its scroll row.
+    fn draw_md(&self, s: &mut Screen, l: &Layout) {
+        let width = crate::editor::md_width(l);
+        let lines = self.md_lines(width);
+        let first = self.buf().md_scroll;
+        let x0 = l.ed_x + 2;
+        let end = x0 + width as u16;
+        for row in 0..l.text_h {
+            let y = l.top + row;
+            let Some(line) = lines.get(first + row as usize) else {
+                break;
+            };
+            if let Some(f) = line.fill {
+                let at = x0 - 1 + line.indent as u16;
+                s.fill(at, y, (width + 2).saturating_sub(line.indent) as u16, f);
+            }
+            let w = crate::markdown::width_of(&line.cells);
+            let mut x = if line.center {
+                x0 + (width.saturating_sub(w) / 2) as u16
+            } else {
+                x0
+            };
+            for &(c, st) in &line.cells {
+                if x + char_width(c, 0) as u16 > end {
+                    break;
+                }
+                x += s.put_char(x, y, c, st);
+            }
+        }
+    }
+
     fn draw_text(&self, s: &mut Screen, l: &Layout) {
+        if self.buf().md_view {
+            return self.draw_md(s, l);
+        }
         let b = self.buf();
         let range = self.sel_range();
         let visual = range.is_some();
@@ -751,6 +790,7 @@ impl Editor {
     /// typing a command, otherwise a message, or the file and the diagnostic under
     /// the cursor; position and language on the right.
     fn draw_status(&self, s: &mut Screen) {
+        self.md_chip.set(None);
         let y = s.h.saturating_sub(1);
         let bar = Style::fg(DIM).on(BAR);
         s.fill_row(y, bar);
@@ -763,6 +803,7 @@ impl Editor {
                 Focus::Tree if self.git_active() => ("GIT", primary()),
                 Focus::Tree => ("TREE", primary()),
                 Focus::Diff => ("DIFF", primary()),
+                Focus::Editor if self.buf().md_view => ("PREVIEW", MACRO),
                 Focus::Editor => ("EDIT", FUNC),
             }
         };
@@ -844,6 +885,17 @@ impl Editor {
                     cx = s.put(cx, y, &t, Style::fg(c).on(BAR));
                 }
                 mid_end -= cw;
+            }
+            // Markdown: a switch between the text and the rendered view.
+            if b.lang.name == "Markdown" {
+                let label = if b.md_view { " ◧ Raw " } else { " ◧ Preview " };
+                let lw = label.width() as u16;
+                if mid_end > x + lw + 30 {
+                    let cx = mid_end - lw - 1;
+                    s.put(cx, y, label, Style::fg(BRIGHT).on(SEL));
+                    self.md_chip.set(Some((cx, cx + lw)));
+                    mid_end = cx - 1;
+                }
             }
         }
         let room = |x: u16| mid_end.saturating_sub(x + 1) as usize;

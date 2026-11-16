@@ -212,6 +212,21 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: Markdown: highlighting and a rendered view
+- **Markdown highlighting**: headings (bold), `**strong**`, `*emphasis*`, `***both***`, inline code, links (text and target), autolinks and bare URLs, list markers, task boxes, quote markers, table pipes, thematic breaks, HTML tags and comments (also over several lines). Fenced code blocks are highlighted in their own language (```` ```rust ````, `py`, `sh`, `ts`, `sql`, `cs`, `xml`/`html`, `dockerfile`, …), with that language's state carried from line to line inside the fence; an unknown language gets the code colour. `snake_case` isn't emphasis.
+- **Rendered view** (`markdown.rs`): `Ctrl+Shift+V` (as in VS Code), `:preview`, or the status bar's `◧ Preview` switch shows the file rendered, `Ctrl+Shift+V` / `◧ Raw` / `Esc` goes back to the text at the same place (the rendered rows remember their source line both ways).
+  - Paragraphs joined and wrapped to the window (at most 100 columns), hard breaks (two spaces, `\`, `<br>`).
+  - Headings in colour, H1 and H2 underlined; setext headings; thematic breaks as a rule.
+  - Lists with `•` `◦` `▪` by depth, numbers kept, `☐`/`☑` task boxes, hanging indents, code blocks inside items indented under them.
+  - Quotes with a bar, GitHub alerts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`) with a coloured label.
+  - Tables drawn as a grid, columns aligned as the separator row says; too wide, the widest column gives way and its cells wrap.
+  - Code blocks as a tinted card with the language's colours and its name in the corner.
+  - Inline: bold, italic, both, strikethrough (dimmed), code on a tint, link text in link colour (the target hidden), images as `[image: alt]`, entities, escapes.
+  - README HTML: `<p align="center">` / `<div align="center">` centre what's inside, `<h1>`..`<h6>` are headings, `<img alt>` an image line, `<code>`/`<b>`/`<em>`/`<br>` inline; other tags and HTML comments go.
+  - Read-only: arrows, PgUp/PgDn, Space, Home/End and the wheel scroll; typing says how to get back; `Ctrl+F` switches back to the text first. The status bar says `PREVIEW`.
+- `Ctrl+Shift+V` only reaches ren in terminals that pass it on with the kitty keyboard protocol (Ghostty on macOS, kitty); most Linux and WSL terminals keep it for their own paste, hence `:preview` and the clickable switch.
+- Tested in tmux on ren's README (centred title and image line, the quote, headings, bullets, the code card, the keys table with wrapped cells, back to line 126 from the table) and a test file with an alert, task boxes, nested lists, a setext heading, a code block in a list item, an aligned table, strikethrough, `***both***`, a hard break and an autolink. Unit tests for the highlighter (lines, fences in their language, HTML comments) and the renderer (inline markup, wrapping, blocks, tables, README HTML); 69 pass.
+
 ### 2026-11-16: SQL, Dockerfile, C#, XML, .sln and notebooks
 - **Highlighting for six more kinds of file**, by file name, so any such file in the project gets it:
   - **SQL** (`.sql`, `.pgsql`, `.ddl`): keywords and types in any case (SQL is often all capitals, so capitals don't mean types here), `--` and `/* */` comments, `'…'` strings over several lines, `"Quoted"` and `` `quoted` `` names left alone, parameters `@p`, `@@version`, `$1`, `:name` (not a `::type` cast).

@@ -16,6 +16,11 @@ pub enum Tok {
     Interp,
     /// The quotes (and prefix: `r#`, `f`, `b`) around a string.
     Quote,
+    /// Markdown: a heading, **strong** and *emphasised* text, a link's target.
+    Heading,
+    Strong,
+    Emph,
+    Url,
 }
 
 /// How a language writes string literals.
@@ -39,6 +44,8 @@ pub enum Strs {
     Sln,
     /// Markup: handled by `highlight_xml`.
     Xml,
+    /// Handled by `highlight_md`.
+    Markdown,
 }
 
 // What a string treats as a placeholder.
@@ -85,6 +92,47 @@ pub enum State {
     Str(StrState),
     /// XML: inside a tag (`<a b="c"` before its `>`).
     Tag,
+    /// Markdown: inside a fenced code block.
+    Fence(Fence),
+}
+
+/// An open fenced code block (```` ```rust ````): how it closes, and the
+/// state of its language's highlighter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fence {
+    ch: char,
+    len: u8,
+    /// Index in `LANGS`, when the info string names a language ren knows.
+    lang: Option<u8>,
+    inner: Inner,
+}
+
+/// `State` without `Fence`, for the code inside a fence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Inner {
+    Code,
+    Block,
+    Str(StrState),
+    Tag,
+}
+
+impl Inner {
+    fn of(s: State) -> Inner {
+        match s {
+            State::Block => Inner::Block,
+            State::Str(x) => Inner::Str(x),
+            State::Tag => Inner::Tag,
+            State::Code | State::Fence(_) => Inner::Code,
+        }
+    }
+    fn state(self) -> State {
+        match self {
+            Inner::Code => State::Code,
+            Inner::Block => State::Block,
+            Inner::Str(x) => State::Str(x),
+            Inner::Tag => State::Tag,
+        }
+    }
 }
 
 pub struct LangDef {
@@ -850,6 +898,24 @@ static SLN: LangDef = LangDef {
     directives: false,
 };
 
+static MARKDOWN: LangDef = LangDef {
+    name: "Markdown",
+    exts: &["md", "markdown", "mdx"],
+    keywords: &[],
+    types: &[],
+    line_comment: &[],
+    // HTML comments; also makes the renderer carry state from line to line.
+    block: Some(("<!--", "-->")),
+    strs: Strs::Markdown,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
 static LANGS: &[&LangDef] = &[
     &RUST,
     &C,
@@ -865,7 +931,13 @@ static LANGS: &[&LangDef] = &[
     &CSHARP,
     &XML,
     &SLN,
+    &MARKDOWN,
 ];
+
+/// Every language ren highlights.
+pub fn langs() -> &'static [&'static LangDef] {
+    LANGS
+}
 
 impl LangDef {
     /// Whether a line's colours can depend on the lines above it.
@@ -1058,7 +1130,7 @@ fn string_open(strs: Strs, line: &[char], i: usize) -> Option<(usize, StrState)>
                 _ => None,
             }
         }
-        Strs::Xml => None,
+        Strs::Xml | Strs::Markdown => None,
     }
 }
 
@@ -1210,6 +1282,7 @@ fn highlight_xml(line: &[char], st: &mut State, out: &mut [Tok]) {
                     i += 1;
                 }
             }
+            State::Fence(_) => *st = State::Code,
             State::Code => {
                 let c = line[i];
                 if starts_with(line, i, "<!--") {
@@ -1248,6 +1321,370 @@ fn highlight_xml(line: &[char], st: &mut State, out: &mut [Tok]) {
                     i += 1;
                 }
             }
+        }
+    }
+}
+
+/// The language a fenced code block names (```` ```rust ````, ```` ```py ````):
+/// its index in `LANGS`.
+pub fn fence_lang(info: &str) -> Option<usize> {
+    let word = info
+        .split(|c: char| c.is_whitespace() || c == '{' || c == ',')
+        .next()?
+        .to_lowercase();
+    let alias = match word.as_str() {
+        "rust" => "rs",
+        "python" | "python3" => "py",
+        "javascript" | "node" => "js",
+        "typescript" => "ts",
+        "shell" | "bash" | "zsh" | "fish" | "console" => "sh",
+        "c++" => "cpp",
+        "csharp" | "c#" => "cs",
+        "golang" => "go",
+        "docker" => "dockerfile",
+        "html" | "xhtml" => "xml",
+        "yml" => "yaml",
+        w => w,
+    };
+    if alias.is_empty() {
+        return None;
+    }
+    LANGS
+        .iter()
+        .position(|l| l.exts.contains(&alias) || l.name.eq_ignore_ascii_case(alias))
+        .filter(|&i| LANGS[i].strs != Strs::Markdown)
+}
+
+/// An opening or closing code fence: (fence character, its length, info string).
+fn fence_open(line: &[char]) -> Option<(char, usize, String)> {
+    let indent = line.iter().take_while(|c| **c == ' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let ch = *line.get(indent)?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = line[indent..].iter().take_while(|c| **c == ch).count();
+    if len < 3 {
+        return None;
+    }
+    let info: String = line[indent + len..].iter().collect();
+    if ch == '`' && info.contains('`') {
+        return None;
+    }
+    Some((ch, len, info.trim().to_string()))
+}
+
+fn md_fence_closes(line: &[char], f: Fence) -> bool {
+    match fence_open(line) {
+        Some((ch, len, info)) => ch == f.ch && len >= f.len as usize && info.is_empty(),
+        None => false,
+    }
+}
+
+/// `---`, `***`, `___` (spaces allowed): a thematic break.
+fn md_rule(line: &[char]) -> bool {
+    let t: Vec<char> = line.iter().copied().filter(|c| !c.is_whitespace()).collect();
+    t.len() >= 3 && matches!(t[0], '-' | '*' | '_') && t.iter().all(|&c| c == t[0])
+}
+
+/// A list item's marker at the start of `line`: (where the marker starts,
+/// where the text starts, ordered).
+pub fn md_list_marker(line: &[char]) -> Option<(usize, usize, bool)> {
+    let indent = line.iter().take_while(|c| **c == ' ' || **c == '\t').count();
+    let c = *line.get(indent)?;
+    let (end, ordered) = if matches!(c, '-' | '*' | '+') {
+        (indent + 1, false)
+    } else if c.is_ascii_digit() {
+        let d = line[indent..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if d > 9 || !matches!(line.get(indent + d), Some('.' | ')')) {
+            return None;
+        }
+        (indent + d + 1, true)
+    } else {
+        return None;
+    };
+    match line.get(end) {
+        Some(' ' | '\t') => Some((indent, end + 1, ordered)),
+        None => Some((indent, end, ordered)),
+        _ => None,
+    }
+}
+
+/// Markdown: headings, emphasis, code (fenced blocks in their own language),
+/// links, lists, quotes, tables, HTML and its comments.
+fn highlight_md(line: &[char], st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    if let State::Fence(f) = *st {
+        if md_fence_closes(line, f) {
+            out.fill(Tok::Comment);
+            *st = State::Code;
+            return;
+        }
+        match f.lang.and_then(|i| LANGS.get(i as usize)) {
+            Some(lang) => {
+                let mut inner = f.inner.state();
+                let toks = highlight_line(lang, line, &mut inner);
+                out.copy_from_slice(&toks);
+                *st = State::Fence(Fence {
+                    inner: Inner::of(inner),
+                    ..f
+                });
+            }
+            None => out.fill(Tok::Str),
+        }
+        return;
+    }
+    let mut i = 0;
+    if *st == State::Block {
+        while i < n && !starts_with(line, i, "-->") {
+            i += 1;
+        }
+        let end = (i + 3).min(n);
+        out[..end].fill(Tok::Comment);
+        if i >= n {
+            return;
+        }
+        *st = State::Code;
+        i = end;
+        return md_inline(line, i, st, out);
+    }
+    if let Some((ch, len, info)) = fence_open(line) {
+        out.fill(Tok::Comment);
+        let start = line.iter().position(|c| *c != ' ' && *c != ch).unwrap_or(n);
+        let info_end = line[start..]
+            .iter()
+            .position(|c| c.is_whitespace())
+            .map_or(n, |p| start + p);
+        out[start..info_end].fill(Tok::Type);
+        *st = State::Fence(Fence {
+            ch,
+            len: len.min(255) as u8,
+            lang: fence_lang(&info).map(|i| i as u8),
+            inner: Inner::Code,
+        });
+        return;
+    }
+    let indent = line.iter().take_while(|c| **c == ' ').count();
+    if indent < 4 {
+        // `# Heading` .. `###### Heading`
+        let hashes = line[indent..].iter().take_while(|c| **c == '#').count();
+        if (1..=6).contains(&hashes) && matches!(line.get(indent + hashes), None | Some(' ' | '\t')) {
+            out.fill(Tok::Heading);
+            return;
+        }
+        // Setext underline (`===`) and thematic breaks (`---`, `***`).
+        let rest: Vec<char> = line[indent..].iter().copied().filter(|c| !c.is_whitespace()).collect();
+        if !rest.is_empty() && rest.iter().all(|&c| c == '=') {
+            out.fill(Tok::Heading);
+            return;
+        }
+        if md_rule(line) {
+            out.fill(Tok::Comment);
+            return;
+        }
+    }
+    // Quote markers, possibly nested: `> > text`.
+    loop {
+        let sp = line[i..].iter().take_while(|c| **c == ' ').count();
+        if sp < 4 && line.get(i + sp) == Some(&'>') {
+            out[i + sp] = Tok::Macro;
+            i += sp + 1;
+        } else {
+            break;
+        }
+    }
+    let after_quote = i;
+    let rest = &line[after_quote..];
+    if let Some((m, text, ordered)) = md_list_marker(rest) {
+        let (m, text) = (after_quote + m, after_quote + text);
+        out[m..text.min(n)].fill(if ordered { Tok::Number } else { Tok::Macro });
+        i = text;
+        // Task list: `- [ ]`, `- [x]`.
+        if i + 2 < n && line[i] == '[' && matches!(line[i + 1], ' ' | 'x' | 'X') && line[i + 2] == ']' {
+            out[i..i + 3].fill(Tok::Macro);
+            i += 3;
+        }
+    } else if rest.first() == Some(&'|') {
+        // A table row: the pipes dim; a separator row (`|---|:-:|`) all dim.
+        if rest.iter().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')) {
+            out[after_quote..].fill(Tok::Comment);
+            return;
+        }
+    }
+    md_inline(line, i, st, out);
+}
+
+/// Inline Markdown from `i`: code spans, emphasis, links, autolinks, HTML.
+fn md_inline(line: &[char], mut i: usize, st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    let word_char = |k: usize| line.get(k).is_some_and(|c| c.is_alphanumeric());
+    while i < n {
+        let c = line[i];
+        match c {
+            '\\' if line.get(i + 1).is_some_and(|c| c.is_ascii_punctuation()) => {
+                out[i..i + 2].fill(Tok::Escape);
+                i += 2;
+            }
+            '|' => {
+                out[i] = Tok::Comment;
+                i += 1;
+            }
+            '`' => {
+                let run = line[i..].iter().take_while(|c| **c == '`').count();
+                let close = (i + run..n).find(|&k| {
+                    line[k] == '`'
+                        && line[k..].iter().take_while(|c| **c == '`').count() == run
+                        && (k == 0 || line[k - 1] != '`')
+                });
+                match close {
+                    Some(k) => {
+                        out[i..i + run].fill(Tok::Quote);
+                        out[i + run..k].fill(Tok::Str);
+                        out[k..k + run].fill(Tok::Quote);
+                        i = k + run;
+                    }
+                    None => i += run,
+                }
+            }
+            '<' if starts_with(line, i, "<!--") => {
+                let start = i;
+                match (i + 4..n).find(|&k| starts_with(line, k, "-->")) {
+                    Some(k) => {
+                        out[start..k + 3].fill(Tok::Comment);
+                        i = k + 3;
+                    }
+                    None => {
+                        out[start..].fill(Tok::Comment);
+                        *st = State::Block;
+                        return;
+                    }
+                }
+            }
+            '<' if line.get(i + 1).is_some_and(|d| *d == '/' || d.is_ascii_alphabetic()) => {
+                let Some(end) = line[i..].iter().position(|c| *c == '>').map(|p| i + p + 1) else {
+                    i += 1;
+                    continue;
+                };
+                let inner: String = line[i + 1..end - 1].iter().collect();
+                if inner.contains("://") || inner.starts_with("mailto:") {
+                    // An autolink: <https://…>
+                    out[i] = Tok::Comment;
+                    out[i + 1..end - 1].fill(Tok::Url);
+                    out[end - 1] = Tok::Comment;
+                } else {
+                    md_tag(line, i, end, out);
+                }
+                i = end;
+            }
+            '!' | '[' => {
+                let open = if c == '!' { i + 1 } else { i };
+                if line.get(open) != Some(&'[') {
+                    i += 1;
+                    continue;
+                }
+                let Some(close) = (open + 1..n).find(|&k| line[k] == ']' && line[k - 1] != '\\') else {
+                    i += 1;
+                    continue;
+                };
+                let target = match line.get(close + 1) {
+                    Some('(') => balanced(line, close + 1, '(', ')', '\0'),
+                    Some('[') => line[close + 1..].iter().position(|c| *c == ']').map(|p| close + 2 + p),
+                    // `[id]: url`, a link reference definition.
+                    Some(':') if line[..open].iter().all(|c| c.is_whitespace()) => Some(n),
+                    _ => None,
+                };
+                match target {
+                    Some(end) => {
+                        out[i..=open].fill(Tok::Comment);
+                        md_inline_range(line, open + 1, close, Tok::Func, out);
+                        out[close] = Tok::Comment;
+                        out[close + 1..end].fill(Tok::Url);
+                        i = end;
+                    }
+                    None => i += 1,
+                }
+            }
+            '*' | '_' => {
+                let run = line[i..].iter().take_while(|k| **k == c).count();
+                let len = run.min(3);
+                // Opens before a non-space; `_` not inside a word (snake_case).
+                let opens = line.get(i + run).is_some_and(|k| !k.is_whitespace())
+                    && !(c == '_' && word_char(i.wrapping_sub(1)));
+                if !opens {
+                    i += run;
+                    continue;
+                }
+                let marker: Vec<char> = std::iter::repeat_n(c, len).collect();
+                let close = (i + len + 1..n).find(|&k| {
+                    line[k..].starts_with(&marker)
+                        && !line[k - 1].is_whitespace()
+                        && !(c == '_' && word_char(k + len))
+                        && (len > 1 || line.get(k + 1) != Some(&c))
+                });
+                match close {
+                    Some(k) => {
+                        out[i..i + len].fill(Tok::Comment);
+                        out[i + len..k].fill(if len >= 2 { Tok::Strong } else { Tok::Emph });
+                        out[k..k + len].fill(Tok::Comment);
+                        i = k + len;
+                    }
+                    None => i += run,
+                }
+            }
+            'h' if starts_with(line, i, "https://") || starts_with(line, i, "http://") => {
+                let end = (i..n)
+                    .find(|&k| line[k].is_whitespace() || matches!(line[k], ')' | '>' | '"' | '\''))
+                    .unwrap_or(n);
+                out[i..end].fill(Tok::Url);
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// Link text: `tok`, with code spans inside still marked.
+fn md_inline_range(line: &[char], from: usize, to: usize, tok: Tok, out: &mut [Tok]) {
+    out[from..to].fill(tok);
+    let mut k = from;
+    while k < to {
+        if line[k] == '`' {
+            if let Some(e) = (k + 1..to).find(|&e| line[e] == '`') {
+                out[k] = Tok::Quote;
+                out[k + 1..e].fill(Tok::Str);
+                out[e] = Tok::Quote;
+                k = e;
+            }
+        }
+        k += 1;
+    }
+}
+
+/// An HTML tag in Markdown, `line[from..to]` from `<` to `>`.
+fn md_tag(line: &[char], from: usize, to: usize, out: &mut [Tok]) {
+    let mut k = from + 1;
+    if line.get(k) == Some(&'/') {
+        k += 1;
+    }
+    let name_end = (k..to).find(|&e| !xml_name_char(line[e])).unwrap_or(to);
+    out[k..name_end].fill(Tok::Keyword);
+    k = name_end;
+    while k < to {
+        let c = line[k];
+        if c == '"' || c == '\'' {
+            let e = (k + 1..to).find(|&e| line[e] == c).unwrap_or(to - 1);
+            out[k] = Tok::Quote;
+            out[k + 1..e].fill(Tok::Str);
+            out[e] = Tok::Quote;
+            k = e + 1;
+        } else if xml_name_char(c) {
+            let e = (k..to).find(|&e| !xml_name_char(line[e])).unwrap_or(to);
+            out[k..e].fill(Tok::Type);
+            k = e;
+        } else {
+            k += 1;
         }
     }
 }
@@ -1441,6 +1878,10 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
         highlight_xml(line, st, &mut out);
         return out;
     }
+    if lang.strs == Strs::Markdown {
+        highlight_md(line, st, &mut out);
+        return out;
+    }
     let mut i = 0;
     while i < n {
         match *st {
@@ -1462,7 +1903,7 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
                 i = scan_string(line, i, s, &mut out, st);
                 continue;
             }
-            State::Code | State::Tag => {}
+            State::Code | State::Tag | State::Fence(_) => {}
         }
         let c = line[i];
         if let Some((s, _)) = lang.block {
@@ -1701,6 +2142,10 @@ mod tests {
                 Tok::Escape => 'e',
                 Tok::Interp => 'i',
                 Tok::Normal => '.',
+                Tok::Heading => 'h',
+                Tok::Strong => 'b',
+                Tok::Emph => 'e',
+                Tok::Url => 'u',
             })
             .collect()
     }
@@ -1800,6 +2245,46 @@ mod tests {
             kinds(&hl(&SLN, r#"Project("{FAE0}") = "App", "src\App.csproj""#)),
             "kkkkkkk.qssssssq....qsssq..qssssssssssssssq"
         );
+    }
+
+    #[test]
+    fn markdown_lines() {
+        assert_eq!(kinds(&hl(&MARKDOWN, "## Title")), "hhhhhhhh");
+        assert_eq!(
+            kinds(&hl(&MARKDOWN, "**b** *e* `c` [t](u) a_b_c")),
+            "ccbcc.cec.qsq.cfcuuu......"
+        );
+        assert_eq!(kinds(&hl(&MARKDOWN, "- [x] done")), "mmmmm.....");
+        assert_eq!(kinds(&hl(&MARKDOWN, "> 1. quoted")), "m.nnn......");
+        assert_eq!(kinds(&hl(&MARKDOWN, "see https://x.io now")), "....uuuuuuuuuuuu....");
+        assert_eq!(kinds(&hl(&MARKDOWN, "| a | b |")), "c...c...c");
+        assert_eq!(kinds(&hl(&MARKDOWN, "<p align=\"center\">")), ".k.ttttt.qssssssq.");
+    }
+
+    #[test]
+    fn markdown_fences_use_their_language() {
+        let mut st = State::default();
+        let line = |s: &str| s.chars().collect::<Vec<_>>();
+        let t = highlight_line(&MARKDOWN, &line("```rust"), &mut st);
+        assert_eq!(kinds(&t), "ccctttt");
+        assert!(matches!(st, State::Fence(_)));
+        let t = highlight_line(&MARKDOWN, &line("let s = \"# not a heading"), &mut st);
+        assert_eq!(&kinds(&t)[..4], "kkk.");
+        // The string goes on inside the fence's language, not as Markdown.
+        let t = highlight_line(&MARKDOWN, &line("still\";"), &mut st);
+        assert_eq!(kinds(&t), "sssssq.");
+        let t = highlight_line(&MARKDOWN, &line("```"), &mut st);
+        assert_eq!(kinds(&t), "ccc");
+        assert_eq!(st, State::Code);
+        // An unknown language: plain code colour.
+        highlight_line(&MARKDOWN, &line("~~~text"), &mut st);
+        assert_eq!(kinds(&highlight_line(&MARKDOWN, &line("x = 1"), &mut st)), "sssss");
+        highlight_line(&MARKDOWN, &line("~~~"), &mut st);
+        // HTML comments over lines.
+        highlight_line(&MARKDOWN, &line("<!-- a"), &mut st);
+        assert_eq!(st, State::Block);
+        let t = highlight_line(&MARKDOWN, &line("b --> **x**"), &mut st);
+        assert_eq!(kinds(&t), "ccccc.ccbcc");
     }
 
     #[test]

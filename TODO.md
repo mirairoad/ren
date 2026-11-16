@@ -64,6 +64,13 @@ What's left after the wish-list rebuild (CHANGES.md, Log 2026-11-11). Ordered ro
 - [ ] csharp-ls's latest release needs a newer .NET SDK than 8.0 (0.15 works with 8.0).
 - [ ] *(suggested)* A notebook view for `.ipynb`: the cells as Python (or the notebook's language) instead of the raw JSON.
 
+## Markdown
+- [ ] The preview shows images as `[image: alt]` (no terminal graphics) and links aren't clickable.
+- [ ] Inside a quote, lists and code blocks are rendered as plain paragraphs; HTML tables, footnotes and definition lists aren't rendered.
+- [ ] Code blocks wider than the window are cut with `…` (no horizontal scroll).
+- [ ] *(suggested)* Click a link in the preview to open it (a file in ren, a URL in the browser).
+- [ ] *(suggested)* A live side-by-side preview while editing.
+
 ## Comments
 - [ ] Ctrl+/ in Vue/Svelte/Astro: switch to `//` inside `<script>` and `/* */` inside `<style>` (today `<!-- -->` everywhere).
 
