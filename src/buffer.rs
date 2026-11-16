@@ -100,6 +100,13 @@ pub struct Buffer {
     pub hint_rev: Option<u64>,
     /// The request in flight: (server id, request id).
     pub hint_req: Option<(&'static str, i64)>,
+    /// `rev` diagnostics were last asked for, from a server that only answers
+    /// when asked (None: ask again), and that request.
+    pub pull_rev: Option<u64>,
+    pub pull_req: Option<(&'static str, i64)>,
+    /// Markdown shown rendered (Ctrl+Shift+V, `:preview`), and its first row.
+    pub md_view: bool,
+    pub md_scroll: usize,
     /// Time of the last edit, to wait for a pause in typing.
     pub edited_at: Instant,
     /// Rust: no `mod` reaches this file, so rust-analyzer ignores it.
@@ -135,6 +142,10 @@ impl Buffer {
             hints: Vec::new(),
             hint_rev: None,
             hint_req: None,
+            pull_rev: None,
+            pull_req: None,
+            md_view: false,
+            md_scroll: 0,
             edited_at: Instant::now(),
             unlinked: false,
             crate_key: None,

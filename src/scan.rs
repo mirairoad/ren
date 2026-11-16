@@ -3,14 +3,16 @@
 //! servers that check the whole project by themselves (rust-analyzer runs
 //! `cargo check`, gopls checks every package, pyright/basedpyright switch to
 //! workspace mode) and runs the command-line checker of the servers that only
-//! look at open files (ruff, tsc).
+//! look at open files (ruff, tsc), or of languages whose servers don't check
+//! the whole project (`dotnet build` for C#, when the folder has a solution
+//! or project file).
 //!
 //! The checkers run again after a save. They run in the background, one at a
 //! time, at low priority, and a rerun waits at least as long as the last run
 //! took, so a slow checker gets at most half the time.
 
 use super::*;
-use crate::lsp::{find_exe, path_key, resolve, root_markers};
+use crate::lsp::{find_exe, find_marker, path_key, resolve, root_markers};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -119,7 +121,7 @@ impl Editor {
     /// checkers. `manual` (`:scan`) also reruns what's already up and says so.
     fn scan_start(&mut self, manual: bool) {
         let root = self.tree.root.clone();
-        let marker = |lang: &str| root_markers(lang).iter().map(|m| root.join(m)).find(|p| p.exists());
+        let marker = |lang: &str| root_markers(lang).iter().find_map(|m| find_marker(&root, m));
         let mut servers: Vec<(&'static str, PathBuf)> = Vec::new();
         let mut checkers: Vec<Checker> = Vec::new();
         for lang in ["Rust", "Go"] {
@@ -156,6 +158,16 @@ impl Editor {
                     lang: "JS/TS",
                     exe,
                     root: root.clone(),
+                });
+            }
+        }
+        if let Some(target) = dotnet_target(&root) {
+            if let Some(exe) = find_exe("dotnet", &[root.as_path()]) {
+                checkers.push(Checker {
+                    name: "dotnet build",
+                    lang: "C#",
+                    exe,
+                    root: target,
                 });
             }
         }
@@ -208,8 +220,16 @@ impl Editor {
         let name = b.name.to_lowercase();
         let config = matches!(
             name.as_str(),
-            "pyproject.toml" | "ruff.toml" | ".ruff.toml" | "package.json" | "setup.cfg"
-        ) || (name.starts_with("tsconfig") && name.ends_with(".json"));
+            "pyproject.toml"
+                | "ruff.toml"
+                | ".ruff.toml"
+                | "package.json"
+                | "setup.cfg"
+                | "directory.build.props"
+                | "directory.packages.props"
+                | "global.json"
+        ) || (name.starts_with("tsconfig") && name.ends_with(".json"))
+            || [".csproj", ".sln", ".slnx"].iter().any(|e| name.ends_with(e));
         let lang = b.lang.name;
         let at = Instant::now() + SAVE_DELAY;
         for c in &self.scan.checkers {
@@ -299,8 +319,61 @@ fn check(c: &Checker) -> Option<HashMap<String, u8>> {
             }
             Some(found)
         }
+        "dotnet build" => {
+            // `root` is the solution or project file; the build runs next to it.
+            let args = [
+                "build",
+                "-nologo",
+                "-v:q",
+                "-clp:NoSummary",
+                "-nodeReuse:false",
+                "-p:GenerateFullPaths=true",
+            ];
+            let mut args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            args.insert(1, c.root.clone().into_os_string());
+            let dir = c.root.parent().unwrap_or(&c.root).to_path_buf();
+            let out = run(
+                &Checker {
+                    root: dir.clone(),
+                    ..c.clone()
+                },
+                args,
+            )?;
+            // `File.cs(3,7): error CS0103: …`, the shape tsc prints.
+            Some(parse_tsc(&out, &dir))
+        }
         _ => None,
     }
+}
+
+/// What `dotnet build` builds for a folder: its one solution (`.sln`, `.slnx`)
+/// or else its one project (`.csproj`). None with none, or several to choose
+/// from (`dotnet build` refuses to guess too).
+fn dotnet_target(root: &Path) -> Option<PathBuf> {
+    let with = |exts: &[&str]| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    for exts in [&["sln", "slnx"][..], &["csproj"]] {
+        let mut found = with(exts);
+        match found.len() {
+            0 => continue,
+            1 => return found.pop(),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Runs the checker's program in the project folder at low priority, and
@@ -387,6 +460,31 @@ mod tests {
         assert_eq!(m.get("/p/c.py"), Some(&1));
         assert_eq!(m.get("/p/d.py"), Some(&1));
         assert!(parse_ruff("ruff failed").is_none());
+    }
+
+    #[test]
+    fn dotnet_output_and_target() {
+        let out = "/p/Program.cs(2,19): error CS0103: The name 'y' does not exist [/p/App.csproj]\n\
+                   /p/Other.cs(1,30): warning CS0168: The variable 'unused' is declared but never used [/p/App.csproj]\n\
+                   /p/App.csproj : error NU1101: Unable to find package Nope.\n";
+        let m = parse_tsc(out, Path::new("/p"));
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get("/p/Program.cs"), Some(&1));
+        assert_eq!(m.get("/p/Other.cs"), Some(&2));
+
+        let dir = env::temp_dir().join(format!("ren-dotnet-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(dotnet_target(&dir), None);
+        fs::write(dir.join("App.csproj"), "").unwrap();
+        assert_eq!(dotnet_target(&dir), Some(dir.join("App.csproj")));
+        // A solution wins over the projects next to it.
+        fs::write(dir.join("App.sln"), "").unwrap();
+        fs::write(dir.join("Tests.csproj"), "").unwrap();
+        assert_eq!(dotnet_target(&dir), Some(dir.join("App.sln")));
+        fs::write(dir.join("Other.sln"), "").unwrap();
+        assert_eq!(dotnet_target(&dir), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
