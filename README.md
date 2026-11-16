@@ -68,9 +68,7 @@ What you have open (every project, its tabs and cursors, and unsaved text) is sa
 
 ## Installation
 
-> No ren releases are published yet, so the one-line installer below won't work until they are. Use **From source**.
-
-ren is built and released for **macOS and Linux**. Windows is paused for now: its code paths and installer stay in the repo, but it doesn't build yet (the embedded terminal is Unix-only), and releases have no Windows binary.
+ren is built and released for **macOS and Linux**, as ready-to-run binaries: the installer downloads one, so you don't need Rust or cargo. Windows is paused for now: its code paths and installer stay in the repo, but it doesn't build yet (the embedded terminal is Unix-only), and releases have no Windows binary.
 
 ### Linux / macOS
 
@@ -78,7 +76,7 @@ ren is built and released for **macOS and Linux**. Windows is paused for now: it
 curl -fsSL https://raw.githubusercontent.com/mirairoad/ren/main/install.sh | sh
 ```
 
-Installs the binary to `~/.local/bin`.
+Downloads the prebuilt binary for your system from the latest release into `~/.local/bin`; nothing is compiled. Run it again to update.
 
 - **Linux:** registers a `.desktop` entry with the application icon and places a launcher on the desktop. It runs `ghostty -e ren` when Ghostty is on `PATH`, otherwise the default terminal. The Linux binary is statically linked (musl) and has no runtime dependencies.
 - **macOS:** creates `~/Applications/Ren IDE.app` with a desktop alias. The launcher opens ren in a new Ghostty window (through a login shell, so `PATH` from your shell config applies). Without Ghostty it falls back to iTerm2, then Terminal.app.
@@ -92,6 +90,8 @@ Binaries for every release are available on the [Releases](https://github.com/mi
 | Linux x86_64 | `ren-linux-x86_64` |
 | macOS Apple Silicon | `ren-macos-arm64` |
 | macOS Intel | `ren-macos-x86_64` |
+
+Downloaded by hand, the file needs `chmod +x` (rename it to `ren` and put it on your `PATH`). On macOS, a binary downloaded in a browser is quarantined and Gatekeeper refuses to open it, since ren isn't notarized: run `xattr -d com.apple.quarantine ren` once, or use the installer above (`curl` doesn't add the quarantine flag).
 
 ### From source
 
@@ -410,9 +410,11 @@ Format on save sends `textDocument/formatting` to the file's language server and
 Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` and every pull request runs `cargo fmt --check` and clippy, and builds and tests Linux x86_64 (static, musl), macOS arm64 and macOS x86_64; pushing a version tag also publishes a GitHub Release with those three binaries attached:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
+
+Bump `version` in `Cargo.toml` first: the welcome screen and `ren --version` show it.
 
 ## Project layout
 
