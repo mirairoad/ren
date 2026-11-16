@@ -212,6 +212,14 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: Release 0.4.1
+- **Version 0.4.1** (`Cargo.toml`, the README's tag example). What's in it since 0.4.0, each entry below:
+  - Highlighting for SQL, Dockerfiles (`Dockerfile.flyway` and the like), C#, XML/MSBuild files, `.sln`, notebooks, Markdown and `.env` files; language servers for C#, Dockerfile and SQL; `dotnet build` diagnostics in the tree.
+  - Markdown's rendered view (`Ctrl+Shift+V`, `:preview`, the `◧ Preview` switch).
+  - ``Ctrl+` `` opens the bottom panel without kitty keys (WSL, tmux); `:q` on the last tab keeps ren open, only `:qa` quits.
+  - The first release built for Linux x86_64, Linux arm64 and macOS Apple Silicon only: no Intel Mac binary (they build from source).
+- #4 (the Linux arm64 / no Intel Mac release change) had been merged into #5's branch just after that went into `main`, so it never reached `main`; this release branch brings it in.
+
 ### 2026-11-16: .env highlighting
 - **`.env` files** are highlighted (status bar: `Dotenv`): `.env`, `.env.template`, `.env.local`, `.env.example`, `.env.production.local` and any other `.env.<name>`, plus `*.env`. A variant ending in a language's own extension (`.env.json`, `.env.sh`) stays that language; `.envrc` is a shell script, not a dotenv file.
   - Keys in the type colour, `export` as a keyword, `#` comments (whole lines, and after a value when a space comes before the `#`, so `https://x/#frag` stays part of the value).
@@ -251,6 +259,12 @@ Based on the Python project test (see Log, 2026-11-11).
 - **Pull diagnostics**: csharp-ls gives diagnostics only when asked (`textDocument/diagnostic`), so ren asks for the open file's once typing pauses, and again on `workspace/diagnostic/refresh`. Only servers that offer it and haven't sent any diagnostics by themselves are asked, so rust-analyzer, pyright and the rest work as before.
 - **Project scan for C#**: with a `.sln`/`.slnx` (else one `.csproj`) at the root and `dotnet` on `PATH`, `dotnet build` runs a second after the folder opens and after saves of `.cs`, project and solution files, like ruff and tsc; its `File.cs(3,7): error CS0103: …` lines are tsc's shape. Several solutions (or several projects and no solution) at the root: no build, as `dotnet build` wouldn't pick either.
 - Tested in tmux on a `dotnet new console` project: the tree showed `Program.cs` red (an error) and `Other.cs` yellow (warnings) from `dotnet build`; every new file type opened with the expected colours; csharp-ls 0.15 (in a temporary tool folder) found the solution through the `*.sln` marker, sent inlay hints, and its pulled diagnostics showed in `:diag` and the gutter, and updated after an edit. Unit tests for each highlighter, file-name detection, the build output and target choice, icons and comment markers; 62 pass.
+
+### 2026-11-16: Next release: Linux arm64 in, Intel Mac out
+- **Release binaries from the next version on: Linux x86_64, Linux arm64, macOS Apple Silicon.** The macOS x86_64 build is dropped; Intel Macs build from source (`./install.sh --local` or `cargo install --git`). 0.4.0 is the last release with an Intel Mac binary.
+- Linux arm64 builds natively on GitHub's `ubuntu-24.04-arm` runner (free for public repos), static with musl like x86_64.
+- `install.sh` no longer refuses Linux arm64 up front. When the latest release has no binary for the machine, it says so and prints how to build from source, instead of failing on the download. So until the next release, Intel Macs still get 0.4.0 and Linux arm64 gets the build-from-source message.
+- README: the install section, the prebuilt table and "Building a release" list the new set.
 
 ### 2026-11-16: First release, 0.4.0
 - **`v0.4.0` is ren's first release**, with prebuilt binaries for Linux x86_64, macOS arm64 and macOS x86_64, so `install.sh` downloads one and nobody needs cargo. The version moves on from zetsu's 0.3.0, which the fork started from.
