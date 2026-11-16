@@ -68,7 +68,7 @@ What you have open (every project, its tabs and cursors, and unsaved text) is sa
 
 ## Installation
 
-ren is built and released for **macOS and Linux**, as ready-to-run binaries: the installer downloads one, so you don't need Rust or cargo. Windows is paused for now: its code paths and installer stay in the repo, but it doesn't build yet (the embedded terminal is Unix-only), and releases have no Windows binary.
+ren is released as ready-to-run binaries for **Linux (x86_64 and arm64)** and **macOS on Apple Silicon**: the installer downloads one, so you don't need Rust or cargo. On an **Intel Mac**, build from source (see below); the installer says so too. Windows is paused for now: its code paths and installer stay in the repo, but it doesn't build yet (the embedded terminal is Unix-only), and releases have no Windows binary.
 
 ### Linux / macOS
 
@@ -88,8 +88,10 @@ Binaries for every release are available on the [Releases](https://github.com/mi
 | Platform | Asset |
 |---|---|
 | Linux x86_64 | `ren-linux-x86_64` |
+| Linux arm64 | `ren-linux-arm64` |
 | macOS Apple Silicon | `ren-macos-arm64` |
-| macOS Intel | `ren-macos-x86_64` |
+
+Intel Macs have no prebuilt binary (0.4.0 was the last with one): build from source.
 
 Downloaded by hand, the file needs `chmod +x` (rename it to `ren` and put it on your `PATH`). On macOS, a binary downloaded in a browser is quarantined and Gatekeeper refuses to open it, since ren isn't notarized: run `xattr -d com.apple.quarantine ren` once, or use the installer above (`curl` doesn't add the quarantine flag).
 
@@ -407,7 +409,7 @@ Format on save sends `textDocument/formatting` to the file's language server and
 
 ## Building a release
 
-Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` and every pull request runs `cargo fmt --check` and clippy, and builds and tests Linux x86_64 (static, musl), macOS arm64 and macOS x86_64; pushing a version tag also publishes a GitHub Release with those three binaries attached:
+Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` and every pull request runs `cargo fmt --check` and clippy, and builds and tests Linux x86_64 and arm64 (static, musl; arm64 on GitHub's Arm runner) and macOS arm64; pushing a version tag also publishes a GitHub Release with those three binaries attached:
 
 ```sh
 git tag v0.4.0

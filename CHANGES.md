@@ -212,6 +212,12 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: Next release: Linux arm64 in, Intel Mac out
+- **Release binaries from the next version on: Linux x86_64, Linux arm64, macOS Apple Silicon.** The macOS x86_64 build is dropped; Intel Macs build from source (`./install.sh --local` or `cargo install --git`). 0.4.0 is the last release with an Intel Mac binary.
+- Linux arm64 builds natively on GitHub's `ubuntu-24.04-arm` runner (free for public repos), static with musl like x86_64.
+- `install.sh` no longer refuses Linux arm64 up front. When the latest release has no binary for the machine, it says so and prints how to build from source, instead of failing on the download. So until the next release, Intel Macs still get 0.4.0 and Linux arm64 gets the build-from-source message.
+- README: the install section, the prebuilt table and "Building a release" list the new set.
+
 ### 2026-11-16: First release, 0.4.0
 - **`v0.4.0` is ren's first release**, with prebuilt binaries for Linux x86_64, macOS arm64 and macOS x86_64, so `install.sh` downloads one and nobody needs cargo. The version moves on from zetsu's 0.3.0, which the fork started from.
 - README: the "no releases yet" note is gone; the installer section says it downloads a binary; downloading by hand needs `chmod +x`, and on macOS `xattr -d com.apple.quarantine` for a browser download (ren isn't notarized; `curl` doesn't quarantine).
