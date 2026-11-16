@@ -9,6 +9,7 @@ mod git;
 mod highlight;
 mod icons;
 mod lsp;
+mod markdown;
 mod render;
 mod screen;
 mod settings;

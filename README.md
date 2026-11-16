@@ -59,11 +59,12 @@ What you have open (every project, its tabs and cursors, and unsaved text) is sa
 - **Language Server Protocol** — completion (including auto-imports and snippet expansion), diagnostics with rule codes, hover, go to definition, references, code actions with resolve support, signature help, rename, document formatting, and inlay hints (types and parameter names drawn in the code, like VS Code). Servers come from the project's `.venv` / `node_modules/.bin` first, then `PATH`, and several can run for one language (e.g. basedpyright + ruff).
 - **Mouse** — click to place the cursor, drag to select, double/triple click for word/line selection, scroll, tab switching, context menu, Ctrl+click to jump to a definition, resizable file tree.
 - **Debugger (DAP)** — breakpoints, stepping, variables tree, call stack, watches and a debug console. Works with CodeLLDB, lldb-dap and gdb for Rust/C/C++, debugpy for Python and Delve for Go. Missing adapters are downloaded on first use, Rust projects are built automatically, Python runs in the project's `.venv`, and `.vscode/launch.json` configurations can be picked from the Debug tab.
+- **Markdown preview** — `Ctrl+Shift+V` (or `:preview`, or the `◧ Preview` switch in the status bar) shows a `.md` file rendered: headings, paragraphs wrapped to the window, bullets and numbered lists, task boxes, quotes and GitHub alerts, tables drawn as a grid with aligned columns, code blocks in their language's colours, bold, italic, links, and the HTML a README uses (`<p align="center">`, `<img alt>`, `<h1>`). The same key (or `Esc`) goes back to the text, at the same place; the file isn't touched.
 - **Find and replace** — inline find bar with live highlighting, match counter, case/whole-word/regex options, capture-group replacement and single-step undo for replace-all.
 - **Navigation** — document symbols, workspace symbol search, references, jump list.
 - **Workspace** — file tree, tabs, folder picker, recent workspaces, per-project `.ren/settings.json`, shell command integration (`:!cargo build`).
 - **System clipboard** — copy, cut and paste are synced with the OS clipboard on Windows, macOS, X11 and Wayland.
-- **Syntax highlighting** for Rust, C/C++, C#, Python, JavaScript/TypeScript, Go, Shell, Lua, SQL, Dockerfiles (`Dockerfile`, `Dockerfile.flyway`, `api.dockerfile`, `Containerfile`), XML (`.csproj` and other MSBuild files, XAML, `.resx`, `.slnx`), Visual Studio solutions (`.sln`), TOML/YAML, JSON and Jupyter notebooks (`.ipynb`, as JSON). The language comes from the file name, so it works for any such file in the project.
+- **Syntax highlighting** for Rust, C/C++, C#, Python, JavaScript/TypeScript, Go, Shell, Lua, SQL, Dockerfiles (`Dockerfile`, `Dockerfile.flyway`, `api.dockerfile`, `Containerfile`), XML (`.csproj` and other MSBuild files, XAML, `.resx`, `.slnx`), Visual Studio solutions (`.sln`), Markdown (code blocks in their own language), TOML/YAML, JSON and Jupyter notebooks (`.ipynb`, as JSON). The language comes from the file name, so it works for any such file in the project.
 - **Rendering** — double-buffered, diff-based redraw; only changed rows are written to the terminal. Truecolor with automatic 256-color fallback.
 
 ## Installation
@@ -137,6 +138,7 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | copy / cut / paste (the whole line when nothing is selected) |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo (in the file tree: undo / redo file commands) |
 | `Ctrl+S` | save |
+| `Ctrl+Shift+V` | Markdown: the rendered view, and back to the text (also `:preview`, or the `◧ Preview` / `◧ Raw` switch in the status bar: most Linux and WSL terminals keep `Ctrl+Shift+V` for their own paste, and without the kitty keyboard protocol it can't be told from `Ctrl+V`) |
 | `Ctrl+/` | comment / uncomment the line or the selected lines (only the marker at the line start: `// a // b` → `a // b`). The marker follows the file type (`//`, `#`, `--`, `;`, `%`, …); CSS, HTML, XML and Markdown get a block comment (`/* … */`, `<!-- … -->`) |
 | `Ctrl+F` / `Ctrl+H` | find / find and replace |
 | `Ctrl+B` | toggle the side panel (file tree, or git with `:git`) |
@@ -167,6 +169,7 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 | `:rm <path>` | move to `.bin/` |
 | `:bin`, `:bin empty` | bin status / empty it |
 | `:open <path>`, `:save <path>`, `:revert` | open a file / save as / reload from disk |
+| `:preview` | a Markdown file rendered, or back to its text |
 | `:cd <dir>`, `:pwd` | change this project's folder / show it |
 | `:!<cmd>` | run a shell command, output in a tab (`%` is the current file) |
 | `:git …` | `init`, `add`, `reset`, `commit [msg]`, `push`, `pull`, `stash`, `branch`, `checkout [-b]` |

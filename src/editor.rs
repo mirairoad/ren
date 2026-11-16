@@ -172,6 +172,7 @@ const COMMANDS: &[&str] = &[
     "open",
     "panel",
     "project",
+    "preview",
     "pwd",
     "q",
     "q!",
@@ -351,6 +352,10 @@ pub struct Editor {
     proj: usize,
     /// The project selector in the tab bar: start and end x.
     pub proj_span: (u16, u16),
+    /// The rendered Markdown of the tab on screen, for (tab, path, rev, width).
+    md_cache: RefCell<Option<(MdKey, Vec<crate::markdown::Line>)>>,
+    /// Columns of the status bar's Preview / Raw switch, while it's shown.
+    pub md_chip: Cell<Option<(u16, u16)>>,
 }
 
 pub const SPLASH_OPEN: usize = 1000;
@@ -511,6 +516,8 @@ impl Editor {
             projects: vec![None],
             proj: 0,
             proj_span: (0, 0),
+            md_cache: RefCell::new(None),
+            md_chip: Cell::new(None),
         };
         ed.sessions = session::list_sessions(&ed.session_id);
         let errs = ed.load_settings();
@@ -872,6 +879,7 @@ impl Editor {
             Focus::Tree => self.tree_key(k),
             Focus::Diff if self.git_active() => self.diff_key(k),
             Focus::Diff => self.focus = Focus::Editor,
+            _ if self.buf().md_view => self.md_key(k),
             _ => self.edit_key(k),
         }
     }
@@ -879,7 +887,8 @@ impl Editor {
     /// Global Ctrl shortcuts. Returns true when the key was handled.
     fn ctrl_key(&mut self, k: KeyEvent) -> bool {
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-        let in_editor = self.focus == Focus::Editor;
+        // A rendered Markdown view takes no edits.
+        let in_editor = self.focus == Focus::Editor && !self.buf().md_view;
         match k.code {
             KeyCode::Char('s') => {
                 self.save(None);
@@ -923,6 +932,14 @@ impl Editor {
             KeyCode::Char('a') if in_editor => self.select_all(),
             KeyCode::Char('c') if in_editor => self.copy(),
             KeyCode::Char('x') if in_editor => self.cut(),
+            // Ctrl+Shift+V on a Markdown file: rendered / raw (as in VS Code).
+            KeyCode::Char('V') | KeyCode::Char('v')
+                if (shift || k.code == KeyCode::Char('V'))
+                    && self.focus == Focus::Editor
+                    && self.buf().lang.name == "Markdown" =>
+            {
+                self.toggle_md_view()
+            }
             KeyCode::Char('v') if in_editor => self.paste(),
             KeyCode::Char(' ') | KeyCode::Null if in_editor => self.trigger_completion(true, None),
             KeyCode::Char('n') | KeyCode::Char('p') if in_editor && self.popup.is_none() => {
@@ -2186,6 +2203,7 @@ impl Editor {
                     Err(e) => self.error(format!("cd: {}", e)),
                 }
             }
+            "preview" | "md" => self.toggle_md_view(),
             "pwd" => {
                 let d = env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
                 self.info(d);
@@ -2569,6 +2587,9 @@ impl Editor {
             self.hover = None;
         }
         self.tab_hover = self.tab_at(m.column, m.row).map(|t| t.2);
+        if self.md_mouse(&m) {
+            return;
+        }
         if self.peek_mouse(&m) {
             return;
         }
@@ -2855,6 +2876,9 @@ impl Editor {
     }
 
     fn wheel(&mut self, d: isize, l: &Layout) {
+        if self.buf().md_view {
+            return self.md_scroll_by(d);
+        }
         let h = l.text_h as usize;
         let b = self.buf_mut();
         let max = b.last() as isize;
@@ -2905,6 +2929,132 @@ pub fn quote_arg(p: &str) -> String {
         format!("\"{}\"", p)
     } else {
         p.to_string()
+    }
+}
+
+/// Which rendering `md_cache` holds: tab, file, revision, width.
+type MdKey = (usize, Option<PathBuf>, u64, usize);
+
+/// Text width of the rendered Markdown view: the editor less a margin on
+/// each side, at most `markdown::MAX_WIDTH`.
+pub fn md_width(l: &Layout) -> usize {
+    (l.ed_w as usize).saturating_sub(4).min(crate::markdown::MAX_WIDTH)
+}
+
+impl Editor {
+    /// The tab on screen rendered as Markdown, `width` wide (cached).
+    pub(crate) fn md_lines(&self, width: usize) -> std::cell::Ref<'_, Vec<crate::markdown::Line>> {
+        let b = self.buf();
+        let key: MdKey = (self.cur, b.path.clone(), b.rev, width);
+        {
+            let mut c = self.md_cache.borrow_mut();
+            if c.as_ref().map(|x| &x.0) != Some(&key) {
+                *c = Some((key, crate::markdown::render(&b.lines, width)));
+            }
+        }
+        std::cell::Ref::map(self.md_cache.borrow(), |c| &c.as_ref().unwrap().1)
+    }
+
+    /// Ctrl+Shift+V, `:preview`, the status bar switch: a Markdown file
+    /// rendered, or back to its text, keeping the place.
+    pub(crate) fn toggle_md_view(&mut self) {
+        if self.buf().lang.name != "Markdown" {
+            return self.error("The preview is for Markdown files (.md)");
+        }
+        let l = self.layout();
+        let width = md_width(&l);
+        let h = l.text_h as usize;
+        self.popup = None;
+        self.sel = None;
+        self.focus = Focus::Editor;
+        if self.buf().md_view {
+            let src = self.md_lines(width).get(self.buf().md_scroll).map(|x| x.src);
+            let b = self.buf_mut();
+            b.md_view = false;
+            if let Some(src) = src {
+                b.scroll_y = src.min(b.last());
+                if b.cy < b.scroll_y || b.cy >= b.scroll_y + h {
+                    b.cy = b.scroll_y;
+                    b.cx = 0;
+                    b.sync_want();
+                }
+            }
+            self.info("Editing the file · Ctrl+Shift+V or :preview shows it rendered");
+        } else {
+            let top = self.buf().scroll_y;
+            // The first rendered row of what was at the top (not a spacer).
+            let at = self
+                .md_lines(width)
+                .iter()
+                .position(|x| x.src >= top && (!x.cells.is_empty() || x.fill.is_some()))
+                .unwrap_or(0);
+            let b = self.buf_mut();
+            b.md_view = true;
+            b.md_scroll = at;
+            self.md_scroll_by(0);
+            self.info("Preview · Ctrl+Shift+V, :preview or Esc goes back to the file");
+        }
+    }
+
+    /// Scrolls the rendered view by `d` rows (0: just keeps it in range).
+    fn md_scroll_by(&mut self, d: isize) {
+        let l = self.layout();
+        let n = self.md_lines(md_width(&l)).len();
+        let max = n.saturating_sub(l.text_h as usize) as isize;
+        let b = self.buf_mut();
+        b.md_scroll = (b.md_scroll as isize + d).clamp(0, max.max(0)) as usize;
+    }
+
+    /// Keys in the rendered view: it scrolls; Esc or Enter goes back to the text.
+    fn md_key(&mut self, k: KeyEvent) {
+        let h = self.layout().text_h as isize;
+        match k.code {
+            KeyCode::Up => self.md_scroll_by(-1),
+            KeyCode::Down => self.md_scroll_by(1),
+            KeyCode::PageUp => self.md_scroll_by(-h),
+            KeyCode::PageDown | KeyCode::Char(' ') => self.md_scroll_by(h),
+            KeyCode::Home => self.md_scroll_by(isize::MIN / 2),
+            KeyCode::End => self.md_scroll_by(isize::MAX / 2),
+            KeyCode::Esc | KeyCode::Enter => self.toggle_md_view(),
+            _ => self.info("The preview is read-only: Esc, Ctrl+Shift+V or :preview to edit the file"),
+        }
+    }
+
+    /// The mouse over the rendered view: the wheel scrolls it, a click only
+    /// focuses it, and resting on it opens nothing. The status bar's
+    /// Preview / Raw switch toggles. True when handled.
+    fn md_mouse(&mut self, m: &MouseEvent) -> bool {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            if let Some((a, e)) = self.md_chip.get() {
+                if m.row == self.h.saturating_sub(1) && m.column >= a && m.column < e {
+                    self.toggle_md_view();
+                    return true;
+                }
+            }
+        }
+        if !self.buf().md_view || self.menu.is_some() {
+            return false;
+        }
+        let l = self.layout();
+        let in_text = m.row >= l.top
+            && m.row < l.top + l.text_h
+            && m.column >= l.ed_x
+            && !(l.dbg_h > 0 && m.row >= l.dbg_y && m.column >= l.dbg_x);
+        if !in_text {
+            return false;
+        }
+        match m.kind {
+            MouseEventKind::ScrollDown => self.md_scroll_by(3),
+            MouseEventKind::ScrollUp => self.md_scroll_by(-3),
+            MouseEventKind::Down(_) => {
+                self.focus = Focus::Editor;
+                self.mode = Mode::Edit;
+            }
+            MouseEventKind::Up(_) => self.drag = Drag::None,
+            _ => {}
+        }
+        self.rest = None;
+        true
     }
 }
 

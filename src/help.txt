@@ -29,6 +29,10 @@ EDITING
   Ctrl+Backspace / Ctrl+Delete     delete word left / right
   Ctrl+S                           save (formats first when formatOnSave is on)
   Ctrl+F / Ctrl+H                  find / find and replace
+  Ctrl+Shift+V (or :preview)       Markdown: the file rendered (headings, lists, tables,
+                                   code in colour), again or Esc for the text. Also the
+                                   ◧ Preview switch in the status bar: most Linux/WSL
+                                   terminals keep Ctrl+Shift+V for their paste
   Ctrl+G                           : line (type a line number to jump there)
   Ctrl+PgUp / Ctrl+PgDn            previous / next tab
 

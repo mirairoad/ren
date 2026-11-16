@@ -135,6 +135,10 @@ pub struct FindBar {
 
 impl Editor {
     pub(crate) fn open_find(&mut self, replace: bool) {
+        // Find works on the text, not the rendered Markdown.
+        if self.buf().md_view {
+            self.toggle_md_view();
+        }
         let mut seed: Option<Vec<char>> = None;
         if let Some((a, e)) = self.sel_range() {
             if a.1 == e.1 {
