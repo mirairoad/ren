@@ -212,6 +212,11 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: Ctrl+` without kitty keys; closing the last tab keeps ren open
+- **Ctrl+` opens the bottom panel in terminals without the kitty keyboard protocol** (Windows Terminal under WSL, tmux, Terminal.app). There Ctrl+` and Ctrl+Space send the same byte (NUL), and ren took it as Ctrl+Space, opening the completion box. Without kitty keys that byte is now the panel's key, from the editor, the tree or a running terminal tab (where it used to go to the shell). Completion stays on `Ctrl+N`, which already worked everywhere. With kitty keys nothing changes: Ctrl+` is the panel, Ctrl+Space completion.
+- **`:q`, `:q!`, `:wq` and `:x` never quit**: closing the last tab leaves the empty tab and the welcome screen, like a tab's × already did. `:q` on that empty tab says "Nothing to close (:qa quits ren)". Only `:qa` / `:qa!` quit, and quitting saves the session, so the welcome screen (or `ren --resume`) reopens everything.
+- Tested in tmux (no kitty keys): Ctrl+Space and Ctrl+` toggled the panel, also from a running shell; `:q` on the only tab, `:q` on the empty tab, `:q` refusing a dirty tab then `:q!`, `:wq` (file written, ren still open), then `:qa` exited and the welcome screen of a new ren listed the session, `1` reopened it.
+
 ### 2026-11-16: First release, 0.4.0
 - **`v0.4.0` is ren's first release**, with prebuilt binaries for Linux x86_64, macOS arm64 and macOS x86_64, so `install.sh` downloads one and nobody needs cargo. The version moves on from zetsu's 0.3.0, which the fork started from.
 - README: the "no releases yet" note is gone; the installer section says it downloads a binary; downloading by hand needs `chmod +x`, and on macOS `xattr -d com.apple.quarantine` for a browser download (ren isn't notarized; `curl` doesn't quarantine).

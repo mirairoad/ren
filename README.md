@@ -141,10 +141,10 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 | `Ctrl+F` / `Ctrl+H` | find / find and replace |
 | `Ctrl+B` | toggle the side panel (file tree, or git with `:git`) |
 | `Ctrl+W` | cycle focus: editor → side panel → bottom panel |
-| `` Ctrl+` `` | bottom panel: Terminal, Debug, Containers (or `:panel`) |
+| `` Ctrl+` `` | bottom panel: Terminal, Debug, Containers (or `:panel`). In terminals without the kitty keyboard protocol (Windows Terminal under WSL, tmux, Terminal.app) `` Ctrl+` `` and `Ctrl+Space` send the same thing, so both open the panel there, and completion is `Ctrl+N` |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab |
 | `Ctrl+R` | project list: switch project, or "Open folder…" (same as clicking the first tab) |
-| `:q` / `:qa` | close tab / quit |
+| `:q` / `:qa` | close the tab (the last one leaves the welcome screen; ren stays open) / quit ren, saving the session to reopen from the welcome screen or `ren --resume` |
 | `:w` / `:wq` | save / save and close the tab |
 | hover a tab | its icon turns into ×: click it (or middle-click the tab) to close; unsaved tabs open `:` for `q!` / `wq` |
 
@@ -183,7 +183,7 @@ Paths: `/x` is the workspace root, `~/x` your home, and anything else is relativ
 | Key | Action |
 |---|---|
 | `Tab` / `Enter` | accept completion |
-| `Ctrl+Space` | trigger completion |
+| `Ctrl+Space`, `Ctrl+N` | trigger completion (only `Ctrl+N` without kitty keys, where `Ctrl+Space` is the panel's) |
 | `F1` | hover documentation |
 | mouse resting on code (1 s) | a box with the problems there (severity, tool and rule code, full message, docs link), the type / docs, and clickable quick fixes |
 | `F12`, `Ctrl+Click` | go to definition |
