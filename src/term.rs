@@ -154,7 +154,8 @@ mod imp {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut ws,
+                    // A raw pointer: Linux takes `*const winsize`, macOS `*mut`.
+                    &raw mut ws,
                 )
             };
             if r != 0 {

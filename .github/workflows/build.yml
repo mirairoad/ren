@@ -24,11 +24,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS and Linux only for now. Windows is paused, not dropped: the
+        # code paths and install.ps1 stay, but it doesn't build yet (the
+        # embedded terminal is Unix-only). To bring it back, add this entry:
+        #   - os: windows-latest
+        #     target: x86_64-pc-windows-msvc
+        #     file: ren.exe
+        #     name: ren-windows-x86_64.exe
         include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            file: ren.exe
-            name: ren-windows-x86_64.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             file: ren
