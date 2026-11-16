@@ -33,8 +33,11 @@ pub use projects::{selector_label, PROJECTS_TITLE};
 mod scan;
 #[path = "session.rs"]
 pub mod session;
+#[path = "workspace.rs"]
+mod workspace;
 pub use ide::{Menu, Popup, MENU_ROWS, POPUP_ROWS};
 pub use session::SHOWN;
+pub use workspace::is_workspace_file;
 
 pub const NONAME: &str = "[untitled]";
 const HELP_NAME: &str = "[help]";
@@ -199,6 +202,7 @@ const COMMANDS: &[&str] = &[
     "unwatch",
     "w",
     "watch",
+    "workspace",
     "wq",
     "wsymbols",
 ];
@@ -216,6 +220,7 @@ fn arg_words(cmd: &str) -> &'static [&'static str] {
         "recover" => &["discard"],
         "session" | "sessions" => &["forget", "list"],
         "project" | "proj" => &["close", "list", "open"],
+        "workspace" | "ws" => &["edit", "open", "save"],
         "install" | "uninstall" => &["codelldb", "debugpy", "delve"],
         _ => &[],
     }
@@ -333,6 +338,9 @@ pub struct Editor {
     ckpt_unsaved: usize,
     /// Saved sessions of earlier runs, for the welcome screen and `:session`.
     pub sessions: Vec<session::SessionInfo>,
+    /// The workspace file this window was opened from or saved into
+    /// (`workspace.rs`); its session is tagged with it.
+    pub(crate) workspace: Option<PathBuf>,
     gitignore_asked: bool,
     /// Code-action requests still out, and whether their menu is showing.
     ca_pending: usize,
@@ -503,6 +511,7 @@ impl Editor {
             ckpt_since: 0,
             ckpt_unsaved: 0,
             sessions: Vec::new(),
+            workspace: None,
             gitignore_asked: false,
             ca_pending: 0,
             ca_menu_open: false,
@@ -2193,6 +2202,7 @@ impl Editor {
             },
             "tree" => self.toggle_tree(),
             "project" | "proj" => self.project_command(&rest),
+            "workspace" | "ws" => self.workspace_command(&rest),
             "cd" => {
                 let target = rest
                     .first()

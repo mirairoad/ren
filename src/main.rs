@@ -155,6 +155,8 @@ fn main() -> io::Result<()> {
         Some("-h") | Some("--help") => {
             println!("ren {}", env!("CARGO_PKG_VERSION"));
             println!("usage: ren [file | folder]");
+            println!("       ren name.workspace.json  open the folders it lists ({{\"open\": [\"~/a\", \"/b\"]}})");
+            println!("                                as that workspace was left (tabs, unsaved text)");
             println!("       ren --resume [n | n.k]   pick a saved session (or restore session n,");
             println!("                                n.k: its checkpoint k steps back)");
             println!("       ren --init   create ~/.ren/settings.json if missing");
@@ -207,6 +209,13 @@ fn main() -> io::Result<()> {
         _ => {}
     }
     let (w, h) = terminal::size()?;
+    if let Some(file) = arg.as_deref().map(std::path::Path::new) {
+        if file.is_file() && editor::is_workspace_file(file) {
+            let mut ed = Editor::new(None, w, h);
+            ed.open_workspace(file);
+            return run_app(ed);
+        }
+    }
     let mut ed = Editor::new(arg, w, h);
     ed.check_recovery();
     run_app(ed)

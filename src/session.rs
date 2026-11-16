@@ -22,6 +22,9 @@
 //!   text starts one too, so that text stays one step back. `:session` and
 //!   `ren --resume` list them under their session; restoring one keeps the
 //!   newer states as checkpoints.
+//! - A window opened from a workspace file (`workspace.rs`) tags its session
+//!   with the file, so opening the file again finds it. Such sessions don't
+//!   count towards the sessions kept while their file exists.
 
 use super::*;
 use serde_json::{json, Value};
@@ -55,10 +58,13 @@ pub struct SessionInfo {
     pub step: usize,
     /// The session's earlier checkpoints, newest first.
     pub earlier: Vec<SessionInfo>,
+    /// The workspace file the window was opened from.
+    pub workspace: Option<PathBuf>,
 }
 
 impl SessionInfo {
-    /// `ren + alpha`: the projects' folder names, the one that was on screen first.
+    /// `ren + alpha`: the projects' folder names, the one that was on screen
+    /// first; `work: ren + alpha` for a session of `work.workspace.json`.
     pub fn title(&self) -> String {
         let names: Vec<String> = self
             .roots
@@ -69,7 +75,11 @@ impl SessionInfo {
                     .unwrap_or_else(|| r.display().to_string())
             })
             .collect();
-        names.join(" + ")
+        let folders = names.join(" + ");
+        match &self.workspace {
+            Some(w) => format!("{}: {}", super::workspace::workspace_name(w), folders),
+            None => folders,
+        }
     }
 
     /// `3 tabs · 2 h ago`, and the warning part (`interrupted · 2 unsaved`).
@@ -242,13 +252,30 @@ fn info_of(id: &str, v: &Value) -> SessionInfo {
         unsaved,
         step: 0,
         earlier: Vec::new(),
+        workspace: v["workspace"].as_str().map(PathBuf::from),
     }
 }
 
-/// Saved sessions other than `own`, newest first: one per set of projects (an
-/// older one stays when it holds unsaved text, or went down together with the
-/// newest), and no session still open in another ren. Deletes the duplicates
-/// and everything past `KEEP`.
+/// A saved session of workspace `file` that another ren has open.
+pub fn workspace_live(file: &Path) -> bool {
+    let Some(rd) = sessions_dir().and_then(|b| fs::read_dir(b).ok()) else {
+        return false;
+    };
+    let key = path_key(file);
+    rd.flatten().any(|e| {
+        let dir = e.path();
+        let tagged = read_json(&dir.join("session.json"))
+            .and_then(|v| v["workspace"].as_str().map(|w| path_key(Path::new(w)) == key))
+            .unwrap_or(false);
+        tagged && is_live(&dir)
+    })
+}
+
+/// Saved sessions other than `own`, newest first: one per set of projects, or
+/// per workspace file (an older one stays when it holds unsaved text, or went
+/// down together with the newest), and no session still open in another ren.
+/// Deletes the duplicates and everything past `KEEP`; a workspace's session
+/// stays while its file exists.
 pub fn list_sessions(own: &str) -> Vec<SessionInfo> {
     let Some(base) = sessions_dir() else { return Vec::new() };
     let Ok(rd) = fs::read_dir(&base) else { return Vec::new() };
@@ -271,9 +298,16 @@ pub fn list_sessions(own: &str) -> Vec<SessionInfo> {
     // The newest save of each set of projects.
     let mut newest: HashMap<Vec<String>, u64> = HashMap::new();
     let mut kept = Vec::new();
+    let mut plain = 0;
     for s in all {
-        let mut key: Vec<String> = s.roots.iter().map(|r| path_key(r)).collect();
-        key.sort();
+        let key: Vec<String> = match &s.workspace {
+            Some(w) => vec![format!("workspace:{}", path_key(w))],
+            None => {
+                let mut k: Vec<String> = s.roots.iter().map(|r| path_key(r)).collect();
+                k.sort();
+                k
+            }
+        };
         let wanted = match newest.get(&key) {
             None => {
                 newest.insert(key, s.saved);
@@ -281,7 +315,11 @@ pub fn list_sessions(own: &str) -> Vec<SessionInfo> {
             }
             Some(&t) => s.unsaved > 0 || (!s.clean && t.saturating_sub(s.saved) <= TOGETHER_SECS),
         };
-        if wanted && kept.len() < KEEP {
+        let pinned = s.workspace.as_ref().is_some_and(|w| w.is_file());
+        if wanted && (pinned || plain < KEEP) {
+            if !pinned {
+                plain += 1;
+            }
             kept.push(s);
         } else {
             let _ = fs::remove_dir_all(base.join(&s.id));
@@ -292,7 +330,9 @@ pub fn list_sessions(own: &str) -> Vec<SessionInfo> {
 
 /// What one project contributes to the session: its state, and the tabs whose
 /// text gets copied (file name, tab, revision).
-type ProjectState = (Value, Vec<(String, usize, u64)>);
+type ProjectState = (Value, Unsaved);
+/// Tabs whose text gets copied: (file name, tab, revision).
+type Unsaved = Vec<(String, usize, u64)>;
 
 /// `~/.ren/session/<folder name>-<hash of the full path>`: where ren before the
 /// session list kept one session per folder. Only read, for a `:reload` from
@@ -391,7 +431,10 @@ impl Editor {
     pub(crate) fn save_session(&mut self, clean: bool, force: bool) -> io::Result<usize> {
         let base = sessions_dir().ok_or_else(|| io::Error::other("no home directory"))?;
         let dir = base.join(&self.session_id);
-        let states = self.each_project(|ed, j| ed.project_state(j, clean));
+        let states: Vec<(Value, Unsaved, usize)> = self.each_project(|ed, j| {
+            let (v, unsaved) = ed.project_state(j, clean);
+            (v, unsaved, j)
+        });
         let now = now_secs();
         let had_live = dir.join("session.json").exists();
         let settled = had_live && now.saturating_sub(self.ckpt_since) >= STABLE_SECS;
@@ -400,9 +443,10 @@ impl Editor {
         let worth = states.len() > 1
             || states
                 .iter()
-                .any(|(v, _)| v["tabs"].as_array().is_some_and(|t| !t.is_empty()))
+                .any(|(v, _, _)| v["tabs"].as_array().is_some_and(|t| !t.is_empty()))
             || settled
-            || step_dir(&dir, 1).exists();
+            || step_dir(&dir, 1).exists()
+            || self.workspace.is_some();
         if !worth {
             self.session_lock = None;
             if dir.exists() {
@@ -412,13 +456,16 @@ impl Editor {
             self.ckpt_shape = 0;
             return Ok(0);
         }
-        let projects: Vec<Value> = states.iter().map(|(v, _)| v.clone()).collect();
+        let projects: Vec<Value> = states.iter().map(|s| s.0.clone()).collect();
         let mut v = json!({
             "version": 1,
             "clean": clean,
             "project": self.proj,
             "projects": projects,
         });
+        if let Some(w) = &self.workspace {
+            v["workspace"] = json!(w.display().to_string());
+        }
         let mut sig = fnv(&v.to_string());
         for (name, _, rev) in states.iter().flat_map(|s| s.1.iter()) {
             sig = sig.wrapping_mul(31) ^ fnv(name) ^ rev;
@@ -448,9 +495,11 @@ impl Editor {
         let _ = fs::remove_dir_all(&ud);
         if n_unsaved > 0 {
             fs::create_dir_all(&ud)?;
-            let lists: Vec<Vec<(String, usize, u64)>> = states.into_iter().map(|s| s.1).collect();
+            // By project index: a project that wasn't there to save (one
+            // being switched to) mustn't shift the others' lists.
+            let lists: HashMap<usize, Unsaved> = states.into_iter().map(|s| (s.2, s.1)).collect();
             let written = self.each_project(|ed, j| -> io::Result<()> {
-                for (name, i, _) in &lists[j] {
+                for (name, i, _) in lists.get(&j).into_iter().flatten() {
                     fs::write(ud.join(name), ed.bufs[*i].text())?;
                 }
                 Ok(())
@@ -571,7 +620,7 @@ impl Editor {
     }
 
     /// Nothing open yet: one project, the welcome screen, no terminal.
-    fn untouched(&self) -> bool {
+    pub(crate) fn untouched(&self) -> bool {
         self.project_count() == 1 && self.is_splash() && self.terms.is_empty()
     }
 
@@ -652,27 +701,10 @@ impl Editor {
         let (opened, n_unsaved) = self.restore_projects(saved, here);
         let info = info_of(id, &v);
         let title = info.title();
-        // Take it over: the restored text is saved into it right away, and
-        // this ren's own (if it wrote one) goes.
-        let own = std::mem::replace(&mut self.session_id, id.to_string());
-        self.session_lock = None;
-        if own != id {
-            let _ = fs::remove_dir_all(base.join(&own));
+        if let Some(w) = info.workspace.clone().filter(|w| w.is_file()) {
+            self.workspace = Some(w);
         }
-        if step > 0 {
-            // Going back: the newer states stay as checkpoints.
-            let _ = push_checkpoint(&dir);
-            self.ckpt_shape = 0;
-            self.ckpt_since = now_secs();
-        } else {
-            // Carrying on from where it was: if this ren had other projects
-            // open, the saved state becomes a checkpoint.
-            self.ckpt_shape = shape_of(&v);
-            self.ckpt_since = v["since"].as_u64().or(v["saved"].as_u64()).unwrap_or(0);
-            self.ckpt_unsaved = info.unsaved;
-        }
-        let _ = self.save_session(false, true);
-        self.sessions.retain(|s| s.id != id);
+        self.take_over(id, step, &v);
         if opened == 0 {
             return Err(format!("Nothing to restore from {}: its folders are gone", title));
         }
@@ -689,6 +721,96 @@ impl Editor {
         } else {
             format!("Restored {}{}", title, when)
         })
+    }
+
+    /// From now on this ren saves into session `id`, whose state `step` (`v`)
+    /// was just restored. The restored text is saved into it right away, and
+    /// this ren's own session (if it wrote one) goes.
+    fn take_over(&mut self, id: &str, step: usize, v: &Value) {
+        let Some(base) = sessions_dir() else { return };
+        let own = std::mem::replace(&mut self.session_id, id.to_string());
+        self.session_lock = None;
+        if own != id {
+            let _ = fs::remove_dir_all(base.join(&own));
+        }
+        if step > 0 {
+            // Going back: the newer states stay as checkpoints.
+            let _ = push_checkpoint(&base.join(id));
+            self.ckpt_shape = 0;
+            self.ckpt_since = now_secs();
+        } else {
+            // Carrying on from where it was: if this ren had other projects
+            // open, the saved state becomes a checkpoint.
+            self.ckpt_shape = shape_of(v);
+            self.ckpt_since = v["since"].as_u64().or(v["saved"].as_u64()).unwrap_or(0);
+            self.ckpt_unsaved = info_of(id, v).unsaved;
+        }
+        let _ = self.save_session(false, true);
+        self.sessions.retain(|s| s.id != id);
+    }
+
+    /// This ren goes on in a new session of its own; the one it had stays
+    /// saved as it is now (used before a workspace joins the window).
+    pub(crate) fn detach_session(&mut self) {
+        let _ = self.save_session(true, true);
+        self.session_lock = None;
+        let mut id = new_id();
+        let mut n = 1;
+        while id == self.session_id || sessions_dir().is_some_and(|b| b.join(&id).exists()) {
+            n += 1;
+            id = format!("{}-{}", new_id(), n);
+        }
+        self.session_id = id;
+        self.autosave_sig = 0;
+        self.ckpt_shape = 0;
+        self.ckpt_since = 0;
+        self.ckpt_unsaved = 0;
+    }
+
+    /// Opens `folders` as projects, in that order, with what session `id`
+    /// saved for them (tabs, unsaved text, tree, panel, the one on screen),
+    /// and takes that session over. Folders it doesn't have open fresh; its
+    /// projects that aren't in `folders` stay closed. Returns (projects
+    /// opened, tabs restored (None: no saved session was read), unsaved tabs).
+    pub(crate) fn open_folders_with(&mut self, folders: &[PathBuf], id: Option<&str>) -> (usize, Option<usize>, usize) {
+        let found = id.and_then(|id| {
+            let dir = sessions_dir()?.join(id);
+            let v = read_json(&dir.join("session.json"))?;
+            Some((id.to_string(), dir, v))
+        });
+        let (from, v) = match &found {
+            Some((_, dir, v)) => (dir.clone(), v.clone()),
+            None => (PathBuf::new(), Value::Null),
+        };
+        let projects = v["projects"].as_array().cloned().unwrap_or_default();
+        let root_key = |p: &Value| p["root"].as_str().map(|r| path_key(Path::new(r)));
+        let here_key = projects
+            .get(v["project"].as_u64().unwrap_or(0) as usize)
+            .and_then(root_key);
+        let mut saved = Vec::new();
+        let mut here = 0;
+        let mut tabs = 0;
+        for f in folders {
+            let key = path_key(f);
+            if here_key.as_deref() == Some(key.as_str()) {
+                here = saved.len();
+            }
+            let mut p = match projects.iter().find(|p| root_key(p).as_deref() == Some(key.as_str())) {
+                Some(p) => p.clone(),
+                None => json!({ "focus": "tree", "tree": { "visible": true } }),
+            };
+            p["root"] = json!(f.display().to_string());
+            tabs += p["tabs"].as_array().map_or(0, Vec::len);
+            saved.push((from.clone(), p));
+        }
+        let (opened, n_unsaved) = self.restore_projects(saved, here);
+        match &found {
+            Some((id, _, v)) => self.take_over(id, 0, v),
+            None => {
+                let _ = self.save_session(false, true);
+            }
+        }
+        (opened, found.is_some().then_some(tabs), n_unsaved)
     }
 
     pub fn session_id(&self) -> &str {
@@ -964,6 +1086,9 @@ mod tests {
             s.detail(),
             ("3 tabs · 2 h ago".to_string(), "interrupted · 1 unsaved".to_string())
         );
+        let mut w = v.clone();
+        w["workspace"] = json!("/w/work.workspace.json");
+        assert_eq!(info_of("id", &w).title(), "work: ren + alpha");
         assert_eq!(ago(30), "just now");
         assert_eq!(ago(150), "2 min ago");
         assert_eq!(ago(3 * 86400), "3 d ago");
