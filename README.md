@@ -47,6 +47,8 @@ Nothing is deleted for real: `:rm`, and anything `:cp` or `:mv` would overwrite,
 
 The first tab is not a file: it shows the open folder's name, and clicking it (or `Ctrl+R`) lists your open projects with "Open folder…" at the end. Each project has its own tabs, file tree, language servers, terminals, debugger and git panel, and keeps running while you work in another. See [Projects](#projects).
 
+Folders you always open together can go in a workspace file, `team.workspace.json` with `{ "open": ["~/work/api", "~/work/web"] }`: `ren team.workspace.json` opens them all, as you left them last time. See [Workspaces](#workspaces).
+
 ### Sessions that come back
 
 What you have open (every project, its tabs and cursors, and unsaved text) is saved as you work. A crash, a killed process or a closed terminal loses a few seconds at most. The welcome screen lists recent sessions, and `ren --resume` lists them all with earlier checkpoints, so you can go back to one later. Every ren window has its own session. See [Sessions](#sessions).
@@ -118,8 +120,9 @@ Re-run it after pulling or editing to update. Instances that are already open ke
 
 ```sh
 ren                 # start screen
-ren path/to/dir     # open a workspace
+ren path/to/dir     # open a folder
 ren src/main.rs     # open a file
+ren team.workspace.json   # open the folders it lists, as you left them
 ren --resume        # pick a saved session (ren --resume 2, or 2.1 for a checkpoint)
 ren --help          # all options
 ```
@@ -178,6 +181,7 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 | `:terminal`, `:containers` | open those panel tabs |
 | `:settings [project]` | global or project settings |
 | `:project`, `:project <n>`, `:project <folder>`, `:project close` | list the open projects / switch to the n-th / open a folder as a project / close the one on screen |
+| `:workspace`, `:workspace open [file]`, `:workspace save [file]`, `:workspace edit` | which workspace file this window is tied to / open one / write the open projects into it / open it in a tab (see [Workspaces](#workspaces)) |
 | `:session`, `:session <n>`, `:session <n>.<k>`, `:session forget <n>` | list saved sessions and their checkpoints / restore one (all its projects) / restore its checkpoint k steps back / delete one (see [Sessions](#sessions)) |
 | `:reload`, `:recover` | restart in place / restore the newest interrupted session with unsaved text |
 
@@ -284,7 +288,39 @@ Restoring brings back all of the session's projects in their order, with their t
 | `:recover`, `:recover discard` | restore the newest interrupted session with unsaved text / drop its unsaved copies |
 | `:reload` | restart ren (new settings, a new build) and come back through the same session |
 
-Sessions live in `~/.ren/sessions/`, one folder per session. ren keeps the 12 newest, one per set of projects, plus older ones that still hold unsaved text or went down together with the newest (several windows closed by one crash).
+Sessions live in `~/.ren/sessions/`, one folder per session. ren keeps the 12 newest, one per set of projects, plus older ones that still hold unsaved text or went down together with the newest (several windows closed by one crash). A workspace's session (see below) is kept on top of those for as long as its file exists.
+
+## Workspaces
+
+A workspace file lists folders that open together. Its name ends in `.workspace.json`, and it can live anywhere:
+
+```jsonc
+// ~/work/team.workspace.json
+{
+  "open": [
+    "~/work/api",          // ~/ is your home
+    "/srv/shared/infra",   // absolute
+    "../notes"             // anything else is from the file's folder
+  ]
+}
+```
+
+`ren ~/work/team.workspace.json` opens every folder as a project, in that order, and brings back where the workspace was left: each project's tabs, cursors and scroll, its file tree and bottom panel, unsaved text, and the project that was on screen. The first time, the folders just open, each with its file tree.
+
+This works because the window's session is tied to the file, so it's found again by the file rather than from the session list. It still shows in the list, as `team: api + infra + notes`, and restoring it from there (or `ren --resume`) ties the window to the file again.
+
+**The file decides which folders open.** A folder added to the file since last time opens fresh; one taken out stays closed; one that doesn't exist (not cloned on this machine yet) is skipped and named in the status bar. Opening or closing projects in the window doesn't touch the file: the status bar says when the projects no longer match it (`not in team.workspace.json`), the project list (`Ctrl+R`) gets a "Save projects to team.workspace.json" row, and `:workspace save` writes the open projects into it. Only the `"open"` list is rewritten, so comments and any other keys stay; entries already there keep how they were written, and new ones are written as `~/…` or absolute paths.
+
+| Command | Action |
+|---|---|
+| `ren <name>.workspace.json` | open the workspace, as it was left |
+| `:workspace` | the workspace file this window is tied to, and how the open projects differ from it |
+| `:workspace open <file>` | open a workspace in this window (its folders join the projects already open; what the window had stays saved as a session of its own). With no file: the workspace file in the current tab, or the folders added to this window's file since it opened |
+| `:workspace save` | write the open projects into this window's workspace file |
+| `:workspace save <file>` | write them into a new (or other) file and tie the window to it; `.workspace.json` is added to the name when it's missing. In a window without a workspace, `:workspace save` (or the project list's "Save as workspace…") starts the command for you, in the folder around the project |
+| `:workspace edit` | open the workspace file in a tab |
+
+The same workspace opened in a second ren opens its folders without the saved tabs, which stay with the first window. A workspace file that can't be read (broken JSON, no `"open"` list, none of its folders there) opens as text with the reason in the status bar: fix it, save, and `:workspace open`.
 
 ## Debugger
 
@@ -421,8 +457,8 @@ Format on save sends `textDocument/formatting` to the file's language server and
 Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` and every pull request runs `cargo fmt --check` and clippy, and builds and tests Linux x86_64 and arm64 (static, musl; arm64 on GitHub's Arm runner) and macOS arm64; pushing a version tag also publishes a GitHub Release with those three binaries attached:
 
 ```sh
-git tag v0.4.1
-git push origin v0.4.1
+git tag v0.4.2
+git push origin v0.4.2
 ```
 
 Bump `version` in `Cargo.toml` first: the welcome screen and `ren --version` show it.
@@ -446,6 +482,7 @@ src/
   find.rs        find and replace bar, search matcher
   session.rs     sessions (~/.ren/sessions): autosave, checkpoints, welcome-screen list, --resume, :reload
   projects.rs    several projects at once: the selector tab, switching, :project
+  workspace.rs   name.workspace.json files: opening them as they were left, :workspace
   scan.rs        project scan: problems in files that aren't open
   peek.rs        the box that opens when the mouse rests on code
   comments.rs    Ctrl+/ comment markers per file type
@@ -458,7 +495,7 @@ src/
   debug_ui.rs    debugger session, breakpoints and the Debug tab
   tools.rs       debug adapter download and installation
   settings.rs    global + project settings, JSONC, templates
-  config.rs      ~/.ren/state (recent workspaces)
+  config.rs      ~/.ren/state (recent folders)
 ```
 
 ## Contributing

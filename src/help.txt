@@ -68,6 +68,14 @@ TABS AND WINDOWS
                   From the shell: ren --resume (the list), ren --resume 2.1
   :recover        restore the newest interrupted session with unsaved text
                   (:recover discard drops its unsaved copies)
+  workspaces      name.workspace.json lists folders: {"open": ["~/a", "/b", "../c"]}
+                  (~/ = home, relative = from the file's folder). ren name.workspace.json
+                  opens them all as projects, with the tabs, unsaved text and the rest
+                  as that workspace was left. The file decides which folders open;
+                  :workspace shows how the open projects differ from it,
+                  :workspace save writes them into it (comments stay),
+                  :workspace save <file> makes a new one, :workspace open <file>
+                  opens one here, :workspace edit opens the file in a tab
 
 FILE TREE
   ↑/↓ PgUp/PgDn Home/End   move

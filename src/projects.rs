@@ -245,10 +245,12 @@ impl Editor {
         if j == self.proj {
             return self.info(format!("Project: {}", self.tree.root_name()));
         }
-        let Some(mut p) = self.projects.get_mut(j).and_then(Option::take) else {
+        if !self.projects.get(j).is_some_and(Option::is_some) {
             return;
-        };
+        }
+        // Parking saves the session, so every project must still be in place.
         self.park_ui();
+        let Some(mut p) = self.projects[j].take() else { return };
         self.swap_project(&mut p);
         self.projects[self.proj] = Some(p);
         self.proj = j;
@@ -271,7 +273,8 @@ impl Editor {
         self.switch_project(self.projects.len() - 1);
         self.push_recent(&dir);
         if !matches!(self.msg, Some((_, true))) {
-            self.info(format!("Opened project: {}", self.tree.root_name()));
+            let note = self.workspace_note(&dir, true);
+            self.info(format!("Opened project: {}{}", self.tree.root_name(), note));
         }
     }
 
@@ -287,20 +290,24 @@ impl Editor {
             return self.error(format!("\"{}\" is not saved: save it, or close it with :q!", name));
         }
         let name = self.tree.root_name();
+        let note = self.workspace_note(&self.tree.root, false);
         let j = if self.proj + 1 < self.projects.len() {
             self.proj + 1
         } else {
             self.proj - 1
         };
-        let Some(mut p) = self.projects[j].take() else { return };
+        if self.projects[j].is_none() {
+            return;
+        }
         self.park_ui();
+        let Some(mut p) = self.projects[j].take() else { return };
         self.swap_project(&mut p);
         // `p` now holds the closing project.
         self.projects.remove(self.proj);
         self.proj = if j > self.proj { j - 1 } else { j };
         p.lsp.stop_all();
         drop(p);
-        self.enter_project(format!("Closed {}", name));
+        self.enter_project(format!("Closed {}{}", name, note));
     }
 
     /// The selector's list: open projects (the one on screen ticked), then
@@ -327,6 +334,9 @@ impl Editor {
             ));
         }
         items.push(("+  Open folder…".into(), MenuAction::Run("project open".into())));
+        if let Some(row) = self.workspace_menu_item() {
+            items.push((row, MenuAction::Run("workspace save".into())));
+        }
         self.menu = Some(Menu {
             title: PROJECTS_TITLE.into(),
             items,
