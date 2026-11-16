@@ -212,6 +212,46 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: .env highlighting
+- **`.env` files** are highlighted (status bar: `Dotenv`): `.env`, `.env.template`, `.env.local`, `.env.example`, `.env.production.local` and any other `.env.<name>`, plus `*.env`. A variant ending in a language's own extension (`.env.json`, `.env.sh`) stays that language; `.envrc` is a shell script, not a dotenv file.
+  - Keys in the type colour, `export` as a keyword, `#` comments (whole lines, and after a value when a space comes before the `#`, so `https://x/#frag` stays part of the value).
+  - Values: `"…"` with escapes and `$VAR`/`${VAR}` marked, `'…'` and `` `…` `` as written; all three can run over several lines (certificates, keys). A bare value is a string, with `$VAR` marked, or a number (`3000`, not `127.0.0.1`) or `true`/`false` when that's all it is. `KEY: value` works too.
+  - Code fences marked ```` ```env ```` or ```` ```dotenv ```` in Markdown use it. The key icon now follows the same names (`prod.env` gets it, `.env.json` gets the JSON one).
+
+### 2026-11-16: Markdown: highlighting and a rendered view
+- **Markdown highlighting**: headings (bold), `**strong**`, `*emphasis*`, `***both***`, inline code, links (text and target), autolinks and bare URLs, list markers, task boxes, quote markers, table pipes, thematic breaks, HTML tags and comments (also over several lines). Fenced code blocks are highlighted in their own language (```` ```rust ````, `py`, `sh`, `ts`, `sql`, `cs`, `xml`/`html`, `dockerfile`, …), with that language's state carried from line to line inside the fence; an unknown language gets the code colour. `snake_case` isn't emphasis.
+- **Rendered view** (`markdown.rs`): `Ctrl+Shift+V` (as in VS Code), `:preview`, or the status bar's `◧ Preview` switch shows the file rendered, `Ctrl+Shift+V` / `◧ Raw` / `Esc` goes back to the text at the same place (the rendered rows remember their source line both ways).
+  - Paragraphs joined and wrapped to the window (at most 100 columns), hard breaks (two spaces, `\`, `<br>`).
+  - Headings in colour, H1 and H2 underlined; setext headings; thematic breaks as a rule.
+  - Lists with `•` `◦` `▪` by depth, numbers kept, `☐`/`☑` task boxes, hanging indents, code blocks inside items indented under them.
+  - Quotes with a bar, GitHub alerts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`) with a coloured label.
+  - Tables drawn as a grid, columns aligned as the separator row says; too wide, the widest column gives way and its cells wrap.
+  - Code blocks as a tinted card with the language's colours and its name in the corner.
+  - Inline: bold, italic, both, strikethrough (dimmed), code on a tint, link text in link colour (the target hidden), images as `[image: alt]`, entities, escapes.
+  - README HTML: `<p align="center">` / `<div align="center">` centre what's inside, `<h1>`..`<h6>` are headings, `<img alt>` an image line, `<code>`/`<b>`/`<em>`/`<br>` inline; other tags and HTML comments go.
+  - Read-only: arrows, PgUp/PgDn, Space, Home/End and the wheel scroll; typing says how to get back; `Ctrl+F` switches back to the text first. The status bar says `PREVIEW`.
+- `Ctrl+Shift+V` only reaches ren in terminals that pass it on with the kitty keyboard protocol (Ghostty on macOS, kitty); most Linux and WSL terminals keep it for their own paste, hence `:preview` and the clickable switch.
+- Tested in tmux on ren's README (centred title and image line, the quote, headings, bullets, the code card, the keys table with wrapped cells, back to line 126 from the table) and a test file with an alert, task boxes, nested lists, a setext heading, a code block in a list item, an aligned table, strikethrough, `***both***`, a hard break and an autolink. Unit tests for the highlighter (lines, fences in their language, HTML comments) and the renderer (inline markup, wrapping, blocks, tables, README HTML); 69 pass.
+
+### 2026-11-16: Ctrl+` without kitty keys; closing the last tab keeps ren open
+- **Ctrl+` opens the bottom panel in terminals without the kitty keyboard protocol** (Windows Terminal under WSL, tmux, Terminal.app). There Ctrl+` and Ctrl+Space send the same byte (NUL), and ren took it as Ctrl+Space, opening the completion box. Without kitty keys that byte is now the panel's key, from the editor, the tree or a running terminal tab (where it used to go to the shell). Completion stays on `Ctrl+N`, which already worked everywhere. With kitty keys nothing changes: Ctrl+` is the panel, Ctrl+Space completion.
+- **`:q`, `:q!`, `:wq` and `:x` never quit**: closing the last tab leaves the empty tab and the welcome screen, like a tab's × already did. `:q` on that empty tab says "Nothing to close (:qa quits ren)". Only `:qa` / `:qa!` quit, and quitting saves the session, so the welcome screen (or `ren --resume`) reopens everything.
+- Tested in tmux (no kitty keys): Ctrl+Space and Ctrl+` toggled the panel, also from a running shell; `:q` on the only tab, `:q` on the empty tab, `:q` refusing a dirty tab then `:q!`, `:wq` (file written, ren still open), then `:qa` exited and the welcome screen of a new ren listed the session, `1` reopened it.
+
+### 2026-11-16: SQL, Dockerfile, C#, XML, .sln and notebooks
+- **Highlighting for six more kinds of file**, by file name, so any such file in the project gets it:
+  - **SQL** (`.sql`, `.pgsql`, `.ddl`): keywords and types in any case (SQL is often all capitals, so capitals don't mean types here), `--` and `/* */` comments, `'…'` strings over several lines, `"Quoted"` and `` `quoted` `` names left alone, parameters `@p`, `@@version`, `$1`, `:name` (not a `::type` cast).
+  - **Dockerfiles**: `Dockerfile`, `Dockerfile.flyway`, `Dockerfile.dev`, `api.dockerfile`, `Containerfile` (not `Dockerfile.dockerignore`). Instructions only count as the line's first word (after `ONBUILD`), so `from` in a `RUN` line stays a word; `AS` in `FROM … AS stage`; `$VAR` and `${VAR}`; shell strings.
+  - **C#** (`.cs`, `.csx`): `$"…{x}…"` interpolation with `{{ }}`, verbatim `@"…"`, raw `"""…"""` over several lines, `#region`/`#if` directives.
+  - **XML**, a new kind of highlighter (markup, not code): tag names, attribute names, values, entities (`&amp;`), comments and tags over several lines, `<?xml ?>`. MSBuild's `$(Prop)`, `@(Items)`, `%(Meta)` are marked. For `.xml`, `.csproj`/`.fsproj`/`.vbproj`, `.props`, `.targets`, `.slnx`, `.xaml`, `.axaml`, `.resx`, `.nuspec`, `.config`, `.xsd`, `.xsl`, `.svg`, `.plist`.
+  - **Visual Studio solutions** (`.sln`): `Project`/`EndProject`/`GlobalSection`… as keywords, strings with backslash paths as they are, `#` comments.
+  - **Jupyter notebooks** (`.ipynb`) as JSON.
+- Icons for C#, solutions and project files, XML, notebooks and every Dockerfile name; `Ctrl+/` markers for `.sln` (`#`), `.slnx`/`.resx`/`.nuspec`/`.config` (`<!-- -->`) and every Dockerfile name.
+- **Language servers**: C# (`csharp-ls`, then `OmniSharp -lsp`), Dockerfile (`docker-langserver --stdio`), SQL (`sqls`, then `sql-language-server`). C#'s root is the folder with a `.sln`, `.slnx` or `.csproj`: root markers can now be `*.ext`.
+- **Pull diagnostics**: csharp-ls gives diagnostics only when asked (`textDocument/diagnostic`), so ren asks for the open file's once typing pauses, and again on `workspace/diagnostic/refresh`. Only servers that offer it and haven't sent any diagnostics by themselves are asked, so rust-analyzer, pyright and the rest work as before.
+- **Project scan for C#**: with a `.sln`/`.slnx` (else one `.csproj`) at the root and `dotnet` on `PATH`, `dotnet build` runs a second after the folder opens and after saves of `.cs`, project and solution files, like ruff and tsc; its `File.cs(3,7): error CS0103: …` lines are tsc's shape. Several solutions (or several projects and no solution) at the root: no build, as `dotnet build` wouldn't pick either.
+- Tested in tmux on a `dotnet new console` project: the tree showed `Program.cs` red (an error) and `Other.cs` yellow (warnings) from `dotnet build`; every new file type opened with the expected colours; csharp-ls 0.15 (in a temporary tool folder) found the solution through the `*.sln` marker, sent inlay hints, and its pulled diagnostics showed in `:diag` and the gutter, and updated after an edit. Unit tests for each highlighter, file-name detection, the build output and target choice, icons and comment markers; 62 pass.
+
 ### 2026-11-16: Next release: Linux arm64 in, Intel Mac out
 - **Release binaries from the next version on: Linux x86_64, Linux arm64, macOS Apple Silicon.** The macOS x86_64 build is dropped; Intel Macs build from source (`./install.sh --local` or `cargo install --git`). 0.4.0 is the last release with an Intel Mac binary.
 - Linux arm64 builds natively on GitHub's `ubuntu-24.04-arm` runner (free for public repos), static with musl like x86_64.

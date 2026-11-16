@@ -451,6 +451,7 @@ impl Editor {
             self.lsp_sync(i);
         }
         let mut changed = self.inlay_tick();
+        self.pull_tick();
         changed |= self.peek_tick();
         changed |= self.scan_tick();
         self.crate_tick();
@@ -507,6 +508,45 @@ impl Editor {
         b.hint_rev = Some(rev);
         b.hint_req = req.map(|r| (id, r));
         false
+    }
+
+    /// Asks for the open file's diagnostics once typing pauses, from a server
+    /// that only gives them when asked (csharp-ls). Servers that send them by
+    /// themselves aren't asked.
+    fn pull_tick(&mut self) {
+        let i = self.cur;
+        let Some(lang) = self.lsp_lang(i) else { return };
+        let b = &self.bufs[i];
+        if !b.lsp_open || b.pull_rev == Some(b.rev) || b.edited_at.elapsed() < HINT_DELAY {
+            return;
+        }
+        if b.pull_req.is_some_and(|(id, req)| self.lsp.is_pending(id, req)) {
+            return;
+        }
+        let Some(id) = self.lsp.pick_pull(lang) else { return };
+        let path = b.path.clone().unwrap();
+        let rev = b.rev;
+        let p = json!({ "textDocument": { "uri": path_to_uri(&path) } });
+        let req = self
+            .lsp
+            .request(id, "textDocument/diagnostic", p, Pending::PullDiags(path, rev));
+        let b = &mut self.bufs[i];
+        b.pull_rev = Some(rev);
+        b.pull_req = req.map(|r| (id, r));
+    }
+
+    /// A pull-diagnostics answer: a full report replaces the file's
+    /// diagnostics from that server, as `publishDiagnostics` would.
+    fn on_pull_diags(&mut self, id: &'static str, path: &Path, rev: u64, result: Value) {
+        let current = self
+            .bufs
+            .iter()
+            .any(|b| b.path.as_deref() == Some(path) && b.rev == rev);
+        if !current || result["kind"].as_str() != Some("full") {
+            return;
+        }
+        let params = json!({ "uri": path_to_uri(path), "diagnostics": result["items"].clone() });
+        self.on_diagnostics(id, &params);
     }
 
     /// Identifies what decides whether a Rust file is in a crate: every open
@@ -787,6 +827,13 @@ impl Editor {
                     self.lsp_idle_gen += 1;
                     for b in self.bufs.iter_mut() {
                         b.hint_rev = None;
+                        // Diagnostics that depend on other files may have changed too.
+                        b.pull_rev = None;
+                    }
+                }
+                "workspace/diagnostic/refresh" => {
+                    for b in self.bufs.iter_mut() {
+                        b.pull_rev = None;
                     }
                 }
                 "window/showMessage" => {
@@ -826,6 +873,7 @@ impl Editor {
                             | Pending::ParentModule(..)
                             | Pending::PeekHover(..)
                             | Pending::PeekActions(..)
+                            | Pending::PullDiags(..)
                     ) {
                         self.error(format!("LSP: {}", e));
                     }
@@ -866,6 +914,7 @@ impl Editor {
                     Pending::ParentModule(path) => self.on_parent_module(&path, result),
                     Pending::PeekHover(seq) => self.on_peek_hover(seq, result),
                     Pending::PeekActions(seq) => self.on_peek_actions(lang, seq, result),
+                    Pending::PullDiags(path, rev) => self.on_pull_diags(lang, &path, rev, result),
                     Pending::Execute | Pending::Init => {}
                 }
             }

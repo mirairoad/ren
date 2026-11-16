@@ -102,6 +102,9 @@ pub fn candidates(lang: &str) -> &'static [&'static [&'static str]] {
         "Go" => &[&["gopls"]],
         "Lua" => &[&["lua-language-server"]],
         "Shell" => &[&["bash-language-server", "start"]],
+        "C#" => &[&["csharp-ls"], &["OmniSharp", "-lsp"], &["omnisharp", "-lsp"]],
+        "Dockerfile" => &[&["docker-langserver", "--stdio"]],
+        "SQL" => &[&["sqls"], &["sql-language-server", "up", "--method", "stdio"]],
         _ => &[],
     }
 }
@@ -113,7 +116,27 @@ pub(crate) fn root_markers(lang: &str) -> &'static [&'static str] {
         "Go" => &["go.mod"],
         "Python" => &["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"],
         "C/C++" => &["compile_commands.json", "CMakeLists.txt", ".clangd", "Makefile"],
+        // `*.x`: any file with that extension.
+        "C#" => &["*.sln", "*.slnx", "*.csproj"],
         _ => &[],
+    }
+}
+
+/// The file a root marker names in `dir`, if it's there: `Cargo.toml`, or for
+/// `*.csproj` the first file with that extension.
+pub(crate) fn find_marker(dir: &Path, marker: &str) -> Option<PathBuf> {
+    match marker.strip_prefix("*.") {
+        Some(ext) => {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)))
+                .collect();
+            found.sort();
+            found.into_iter().next()
+        }
+        None => Some(dir.join(marker)).filter(|p| p.exists()),
     }
 }
 
@@ -122,7 +145,7 @@ pub fn find_root(lang: &str, file: &Path, fallback: &Path) -> PathBuf {
     let markers = root_markers(lang);
     let mut git = None;
     while let Some(d) = dir {
-        if markers.iter().any(|m| d.join(m).exists()) {
+        if markers.iter().any(|m| find_marker(d, m).is_some()) {
             return d.to_path_buf();
         }
         if git.is_none() && d.join(".git").exists() {
@@ -197,6 +220,10 @@ pub fn language_id(lang: &str, path: &Path) -> &'static str {
         "Go" => "go",
         "Lua" => "lua",
         "Shell" => "shellscript",
+        "C#" => "csharp",
+        "Dockerfile" => "dockerfile",
+        "SQL" => "sql",
+        "XML" => "xml",
         _ => "plaintext",
     }
 }
@@ -247,6 +274,8 @@ pub enum Pending {
     /// Hover and quick fixes for the mouse-rest box number `seq`.
     PeekHover(u64),
     PeekActions(u64),
+    /// Pull diagnostics (`textDocument/diagnostic`) for the file at `rev`.
+    PullDiags(PathBuf, u64),
 }
 
 pub struct Diag {
@@ -335,6 +364,9 @@ pub struct Server {
     /// When the server last became idle (ready, or its work list emptied).
     pub idle_since: Instant,
     pub dead: bool,
+    /// Has sent diagnostics by itself (`publishDiagnostics`). A server that
+    /// offers pull diagnostics and never does is asked (csharp-ls).
+    pub pushed: bool,
 }
 
 pub fn log(dir: &str, body: &str) {
@@ -608,6 +640,14 @@ impl Lsp {
             .is_some_and(|s| s.progress.is_empty() && s.idle_since.elapsed() >= Duration::from_millis(1500))
     }
 
+    /// A ready server of `lang` to ask for diagnostics: it offers them on
+    /// request and hasn't sent any by itself (those that do keep doing so).
+    pub fn pick_pull(&self, lang: &str) -> Option<&'static str> {
+        self.ids(lang)
+            .into_iter()
+            .find(|id| self.ready(id) && self.cap(id, "diagnosticProvider") && !self.servers[*id].pushed)
+    }
+
     /// A ready server of `lang` that offers rust-analyzer's experimental `name` request.
     pub fn pick_experimental(&self, lang: &str, name: &str) -> Option<&'static str> {
         self.ids(lang)
@@ -743,6 +783,7 @@ impl Lsp {
             progress: HashMap::new(),
             idle_since: Instant::now(),
             dead: false,
+            pushed: false,
         };
         let root_name = root
             .file_name()
@@ -894,7 +935,7 @@ impl Lsp {
                             .collect();
                         s.write(&json!({ "jsonrpc": "2.0", "id": id, "result": folders }));
                     }
-                    "workspace/inlayHint/refresh" => {
+                    "workspace/inlayHint/refresh" | "workspace/diagnostic/refresh" => {
                         s.write(&json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null }));
                         out.push(LspEvent::Notification {
                             lang,
@@ -941,6 +982,9 @@ impl Lsp {
                         }
                     }
                 } else {
+                    if m == "textDocument/publishDiagnostics" {
+                        s.pushed = true;
+                    }
                     out.push(LspEvent::Notification {
                         lang,
                         method: m,

@@ -16,6 +16,11 @@ pub enum Tok {
     Interp,
     /// The quotes (and prefix: `r#`, `f`, `b`) around a string.
     Quote,
+    /// Markdown: a heading, **strong** and *emphasised* text, a link's target.
+    Heading,
+    Strong,
+    Emph,
+    Url,
 }
 
 /// How a language writes string literals.
@@ -31,6 +36,18 @@ pub enum Strs {
     Toml,
     Json,
     Lua,
+    /// `'…'` (multi-line, `''` inside); `"…"` and `` `…` `` are names, not strings.
+    Sql,
+    /// `"…"`, `$"…{x}…"`, `@"…"`, `"""…"""`, `'c'`.
+    CSharp,
+    /// `"…"` with backslashes as they are (Visual Studio solutions).
+    Sln,
+    /// Markup: handled by `highlight_xml`.
+    Xml,
+    /// Handled by `highlight_md`.
+    Markdown,
+    /// `.env` files: handled by `highlight_env`.
+    Env,
 }
 
 // What a string treats as a placeholder.
@@ -75,6 +92,49 @@ pub enum State {
     Code,
     Block,
     Str(StrState),
+    /// XML: inside a tag (`<a b="c"` before its `>`).
+    Tag,
+    /// Markdown: inside a fenced code block.
+    Fence(Fence),
+}
+
+/// An open fenced code block (```` ```rust ````): how it closes, and the
+/// state of its language's highlighter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fence {
+    ch: char,
+    len: u8,
+    /// Index in `LANGS`, when the info string names a language ren knows.
+    lang: Option<u8>,
+    inner: Inner,
+}
+
+/// `State` without `Fence`, for the code inside a fence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Inner {
+    Code,
+    Block,
+    Str(StrState),
+    Tag,
+}
+
+impl Inner {
+    fn of(s: State) -> Inner {
+        match s {
+            State::Block => Inner::Block,
+            State::Str(x) => Inner::Str(x),
+            State::Tag => Inner::Tag,
+            State::Code | State::Fence(_) => Inner::Code,
+        }
+    }
+    fn state(self) -> State {
+        match self {
+            Inner::Code => State::Code,
+            Inner::Block => State::Block,
+            Inner::Str(x) => State::Str(x),
+            Inner::Tag => State::Tag,
+        }
+    }
 }
 
 pub struct LangDef {
@@ -88,6 +148,14 @@ pub struct LangDef {
     pub macros: bool,
     pub caps_types: bool,
     pub plain: bool,
+    /// Keywords and types match in any case (lists in lower case): SQL, Dockerfile.
+    pub ci: bool,
+    /// Keywords only as the first word of a line (Dockerfile instructions).
+    pub lead: bool,
+    /// `$name` and `${…}` outside strings are variables.
+    pub vars: bool,
+    /// `#word` at the start of a line is a directive (`#region`, `#if`).
+    pub directives: bool,
 }
 
 static PLAIN: LangDef = LangDef {
@@ -101,6 +169,10 @@ static PLAIN: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: true,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static RUST: LangDef = LangDef {
@@ -121,6 +193,10 @@ static RUST: LangDef = LangDef {
     macros: true,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static C: LangDef = LangDef {
@@ -191,6 +267,10 @@ static C: LangDef = LangDef {
     macros: false,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static PYTHON: LangDef = LangDef {
@@ -210,6 +290,10 @@ static PYTHON: LangDef = LangDef {
     macros: false,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static JS: LangDef = LangDef {
@@ -276,6 +360,10 @@ static JS: LangDef = LangDef {
     macros: false,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static GO: LangDef = LangDef {
@@ -321,6 +409,10 @@ static GO: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static SHELL: LangDef = LangDef {
@@ -337,6 +429,10 @@ static SHELL: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static TOML: LangDef = LangDef {
@@ -350,11 +446,16 @@ static TOML: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static JSON: LangDef = LangDef {
     name: "JSON",
-    exts: &["json", "jsonc"],
+    // Jupyter notebooks are JSON.
+    exts: &["json", "jsonc", "ipynb"],
     keywords: &["true", "false", "null"],
     types: &[],
     line_comment: &[],
@@ -363,6 +464,10 @@ static JSON: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static LUA: LangDef = LangDef {
@@ -379,14 +484,491 @@ static LUA: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
-static LANGS: &[&LangDef] = &[&RUST, &C, &PYTHON, &JS, &GO, &SHELL, &TOML, &JSON, &LUA];
+static SQL: LangDef = LangDef {
+    name: "SQL",
+    exts: &["sql", "pgsql", "ddl"],
+    keywords: &[
+        "add",
+        "all",
+        "alter",
+        "always",
+        "analyze",
+        "and",
+        "any",
+        "as",
+        "asc",
+        "begin",
+        "between",
+        "by",
+        "cascade",
+        "case",
+        "check",
+        "collate",
+        "column",
+        "commit",
+        "conflict",
+        "constraint",
+        "create",
+        "cross",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "database",
+        "declare",
+        "default",
+        "delete",
+        "desc",
+        "distinct",
+        "do",
+        "drop",
+        "else",
+        "end",
+        "except",
+        "exec",
+        "execute",
+        "exists",
+        "explain",
+        "extension",
+        "false",
+        "fetch",
+        "first",
+        "for",
+        "foreign",
+        "from",
+        "full",
+        "function",
+        "generated",
+        "go",
+        "grant",
+        "group",
+        "having",
+        "identity",
+        "if",
+        "ilike",
+        "in",
+        "index",
+        "inner",
+        "insert",
+        "intersect",
+        "into",
+        "is",
+        "join",
+        "key",
+        "language",
+        "last",
+        "lateral",
+        "left",
+        "like",
+        "limit",
+        "materialized",
+        "merge",
+        "natural",
+        "next",
+        "not",
+        "nothing",
+        "null",
+        "nulls",
+        "of",
+        "offset",
+        "on",
+        "only",
+        "or",
+        "order",
+        "outer",
+        "over",
+        "partition",
+        "primary",
+        "procedure",
+        "recursive",
+        "references",
+        "rename",
+        "replace",
+        "restrict",
+        "return",
+        "returning",
+        "returns",
+        "revoke",
+        "right",
+        "rollback",
+        "row",
+        "rows",
+        "schema",
+        "select",
+        "sequence",
+        "set",
+        "table",
+        "temp",
+        "temporary",
+        "then",
+        "to",
+        "top",
+        "transaction",
+        "trigger",
+        "true",
+        "truncate",
+        "type",
+        "union",
+        "unique",
+        "update",
+        "using",
+        "vacuum",
+        "values",
+        "view",
+        "when",
+        "where",
+        "window",
+        "with",
+        "without",
+    ],
+    types: &[
+        "bigint",
+        "bigserial",
+        "binary",
+        "bit",
+        "blob",
+        "bool",
+        "boolean",
+        "bytea",
+        "char",
+        "character",
+        "cidr",
+        "clob",
+        "date",
+        "datetime",
+        "datetime2",
+        "datetimeoffset",
+        "decimal",
+        "double",
+        "enum",
+        "float",
+        "inet",
+        "int",
+        "int2",
+        "int4",
+        "int8",
+        "integer",
+        "interval",
+        "json",
+        "jsonb",
+        "money",
+        "nchar",
+        "ntext",
+        "numeric",
+        "nvarchar",
+        "precision",
+        "real",
+        "serial",
+        "smallint",
+        "smallserial",
+        "text",
+        "time",
+        "timestamp",
+        "timestamptz",
+        "timetz",
+        "tinyint",
+        "uniqueidentifier",
+        "uuid",
+        "varbinary",
+        "varchar",
+        "xml",
+    ],
+    line_comment: &["--"],
+    block: Some(("/*", "*/")),
+    strs: Strs::Sql,
+    macros: false,
+    // SQL is often written in capitals: they say nothing about types.
+    caps_types: false,
+    plain: false,
+    ci: true,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+/// Found by file name (`Dockerfile`, `Dockerfile.flyway`, `app.dockerfile`,
+/// `Containerfile`), see `detect`.
+static DOCKERFILE: LangDef = LangDef {
+    name: "Dockerfile",
+    exts: &["dockerfile", "containerfile"],
+    keywords: &[
+        "add",
+        "arg",
+        "as",
+        "cmd",
+        "copy",
+        "entrypoint",
+        "env",
+        "expose",
+        "from",
+        "healthcheck",
+        "label",
+        "maintainer",
+        "onbuild",
+        "run",
+        "shell",
+        "stopsignal",
+        "user",
+        "volume",
+        "workdir",
+    ],
+    types: &[],
+    line_comment: &["#"],
+    block: None,
+    strs: Strs::Shell,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: true,
+    lead: true,
+    vars: true,
+    directives: false,
+};
+
+static CSHARP: LangDef = LangDef {
+    name: "C#",
+    exts: &["cs", "csx"],
+    keywords: &[
+        "abstract",
+        "add",
+        "alias",
+        "and",
+        "as",
+        "async",
+        "await",
+        "base",
+        "break",
+        "case",
+        "catch",
+        "checked",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "delegate",
+        "do",
+        "else",
+        "enum",
+        "event",
+        "explicit",
+        "extern",
+        "false",
+        "file",
+        "finally",
+        "fixed",
+        "for",
+        "foreach",
+        "get",
+        "global",
+        "goto",
+        "if",
+        "implicit",
+        "in",
+        "init",
+        "interface",
+        "internal",
+        "is",
+        "lock",
+        "nameof",
+        "namespace",
+        "new",
+        "not",
+        "null",
+        "operator",
+        "or",
+        "out",
+        "override",
+        "params",
+        "partial",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "record",
+        "ref",
+        "remove",
+        "required",
+        "return",
+        "scoped",
+        "sealed",
+        "set",
+        "sizeof",
+        "stackalloc",
+        "static",
+        "struct",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typeof",
+        "unchecked",
+        "unsafe",
+        "using",
+        "value",
+        "var",
+        "virtual",
+        "volatile",
+        "when",
+        "where",
+        "while",
+        "with",
+        "yield",
+        "from",
+        "select",
+        "orderby",
+        "group",
+        "into",
+        "join",
+        "let",
+        "on",
+        "equals",
+        "by",
+        "ascending",
+        "descending",
+    ],
+    types: &[
+        "bool", "byte", "char", "decimal", "double", "dynamic", "float", "int", "long", "nint", "nuint", "object",
+        "sbyte", "short", "string", "uint", "ulong", "ushort", "void",
+    ],
+    line_comment: &["//"],
+    block: Some(("/*", "*/")),
+    strs: Strs::CSharp,
+    macros: false,
+    caps_types: true,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: true,
+};
+
+/// XML and the .NET files written in it (projects, MSBuild, XAML, resources).
+static XML: LangDef = LangDef {
+    name: "XML",
+    exts: &[
+        "xml", "csproj", "fsproj", "vbproj", "props", "targets", "slnx", "xaml", "axaml", "resx", "nuspec", "config",
+        "xsd", "xsl", "xslt", "svg", "plist",
+    ],
+    keywords: &[],
+    types: &[],
+    line_comment: &[],
+    block: Some(("<!--", "-->")),
+    strs: Strs::Xml,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+/// Visual Studio solutions (`.sln`).
+static SLN: LangDef = LangDef {
+    name: "Solution",
+    exts: &["sln"],
+    keywords: &[
+        "Project",
+        "EndProject",
+        "ProjectSection",
+        "EndProjectSection",
+        "Global",
+        "EndGlobal",
+        "GlobalSection",
+        "EndGlobalSection",
+        "preSolution",
+        "postSolution",
+        "preProject",
+        "postProject",
+    ],
+    types: &[],
+    line_comment: &["#"],
+    block: None,
+    strs: Strs::Sln,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+static MARKDOWN: LangDef = LangDef {
+    name: "Markdown",
+    exts: &["md", "markdown", "mdx"],
+    keywords: &[],
+    types: &[],
+    line_comment: &[],
+    // HTML comments; also makes the renderer carry state from line to line.
+    block: Some(("<!--", "-->")),
+    strs: Strs::Markdown,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+/// `.env`, `.env.local`, `.env.template`, `prod.env`: found by name, see
+/// `is_dotenv`. `line_comment` is for comment toggling.
+static DOTENV: LangDef = LangDef {
+    name: "Dotenv",
+    exts: &["env"],
+    keywords: &[],
+    types: &[],
+    line_comment: &["#"],
+    block: None,
+    strs: Strs::Env,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+static LANGS: &[&LangDef] = &[
+    &RUST,
+    &C,
+    &PYTHON,
+    &JS,
+    &GO,
+    &SHELL,
+    &TOML,
+    &JSON,
+    &LUA,
+    &SQL,
+    &DOCKERFILE,
+    &CSHARP,
+    &XML,
+    &SLN,
+    &MARKDOWN,
+    &DOTENV,
+];
+
+/// Every language ren highlights.
+pub fn langs() -> &'static [&'static LangDef] {
+    LANGS
+}
 
 impl LangDef {
     /// Whether a line's colours can depend on the lines above it.
     pub fn multiline(&self) -> bool {
-        self.block.is_some() || matches!(self.strs, Strs::Rust | Strs::Python | Strs::Js | Strs::Go | Strs::Toml)
+        self.block.is_some()
+            || matches!(
+                self.strs,
+                Strs::Rust | Strs::Python | Strs::Js | Strs::Go | Strs::Toml | Strs::Sql | Strs::CSharp | Strs::Env
+            )
     }
 }
 
@@ -394,7 +976,41 @@ pub fn plain() -> &'static LangDef {
     &PLAIN
 }
 
+/// `Dockerfile`, `Dockerfile.flyway`, `Dockerfile.dev`, `app.dockerfile`,
+/// `Containerfile` (not their `.dockerignore` files).
+pub fn is_dockerfile(name: &str) -> bool {
+    let n = name.to_lowercase();
+    if n.ends_with(".dockerignore") {
+        return false;
+    }
+    ["dockerfile", "containerfile"]
+        .iter()
+        .any(|d| n == *d || n.starts_with(&format!("{}.", d)) || n.ends_with(&format!(".{}", d)))
+}
+
+/// `.env` and its variants (`.env.local`, `.env.template`, `.env.example`,
+/// `.env.production.local`) and `*.env`. A variant ending in a language's own
+/// extension (`.env.json`, `.env.sh`) is that language; `.envrc` is a shell
+/// script.
+pub fn is_dotenv(name: &str) -> bool {
+    let n = name.to_lowercase();
+    if n.ends_with(".env") {
+        return true;
+    }
+    n.strip_prefix(".env.").is_some_and(|rest| {
+        let ext = rest.rsplit('.').next().unwrap_or(rest);
+        !LANGS.iter().any(|l| l.exts.contains(&ext))
+    })
+}
+
 pub fn detect(path: &Path) -> &'static LangDef {
+    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    if is_dockerfile(&name) {
+        return &DOCKERFILE;
+    }
+    if is_dotenv(&name) {
+        return &DOTENV;
+    }
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -526,6 +1142,590 @@ fn string_open(strs: Strs, line: &[char], i: usize) -> Option<(usize, StrState)>
             Some((1, s(q, esc, 0, false)))
         }
         Strs::Json => (at(0)? == '"').then(|| (1, s('"', Esc::Yes, 0, false))),
+        Strs::Sql => (at(0)? == '\'').then(|| (1, s('\'', Esc::No, 0, true))),
+        Strs::Sln => (at(0)? == '"').then(|| (1, s('"', Esc::No, 0, false))),
+        Strs::CSharp => {
+            // Prefixes `$` (interpolated) and `@` (verbatim), in either order.
+            let (mut k, mut interp, mut verbatim) = (0, false, false);
+            while k < 3 {
+                match at(k) {
+                    Some('$') => interp = true,
+                    Some('@') => verbatim = true,
+                    _ => break,
+                }
+                k += 1;
+            }
+            let fmt = if interp { FMT_EXPR } else { 0 };
+            match at(k)? {
+                '"' if at(k + 1) == Some('"') && at(k + 2) == Some('"') => Some((
+                    k + 3,
+                    StrState {
+                        triple: true,
+                        ..s('"', Esc::No, fmt, true)
+                    },
+                )),
+                '"' if verbatim => Some((k + 1, s('"', Esc::No, fmt, true))),
+                '"' => Some((k + 1, s('"', Esc::Yes, fmt, false))),
+                '\'' if k == 0 => Some((1, s('\'', Esc::Yes, 0, false))),
+                _ => None,
+            }
+        }
+        Strs::Xml | Strs::Markdown | Strs::Env => None,
+    }
+}
+
+/// Dockerfile: an instruction is the line's first word (after `ONBUILD`),
+/// and `AS` names a `FROM` stage.
+fn at_lead(line: &[char], start: usize, word: &str) -> bool {
+    let before: String = line[..start].iter().collect();
+    let before = before.trim();
+    before.is_empty()
+        || before.eq_ignore_ascii_case("onbuild")
+        || (word == "as"
+            && before
+                .split_whitespace()
+                .next()
+                .is_some_and(|f| f.eq_ignore_ascii_case("from")))
+}
+
+/// `$name`, `${name:-x}`: end (exclusive) of the variable at `line[i] == '$'`.
+fn shell_var(line: &[char], i: usize) -> Option<usize> {
+    match line.get(i + 1)? {
+        '{' => balanced(line, i + 1, '{', '}', '\0'),
+        c if c.is_alphabetic() || *c == '_' => {
+            let mut e = i + 1;
+            while e < line.len() && (line[e].is_alphanumeric() || line[e] == '_') {
+                e += 1;
+            }
+            Some(e)
+        }
+        _ => None,
+    }
+}
+
+/// SQL parameters and variables: `@name`, `@@version`, `$1`, `:name` (not a
+/// `::type` cast). End (exclusive), at `i`.
+fn sql_param(line: &[char], i: usize) -> Option<usize> {
+    let c = line[i];
+    let next = *line.get(i + 1)?;
+    let word_end = |from: usize| {
+        let mut e = from;
+        while e < line.len() && (line[e].is_alphanumeric() || line[e] == '_') {
+            e += 1;
+        }
+        e
+    };
+    match c {
+        '@' if next == '@' && line.get(i + 2).is_some_and(|c| c.is_alphabetic()) => Some(word_end(i + 2)),
+        '@' if next.is_alphabetic() || next == '_' => Some(word_end(i + 1)),
+        '$' if next.is_ascii_digit() => Some(word_end(i + 1)),
+        ':' if (next.is_alphabetic() || next == '_') && (i == 0 || line[i - 1] != ':') => Some(word_end(i + 1)),
+        _ => None,
+    }
+}
+
+fn xml_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
+}
+
+/// `&amp;` `&#10;` `&#x1F;`: end (exclusive) of the entity at `line[i] == '&'`.
+fn xml_entity(line: &[char], i: usize) -> Option<usize> {
+    for (j, &c) in line.iter().enumerate().skip(i + 1).take(12) {
+        if c == ';' {
+            return (j > i + 1).then_some(j + 1);
+        }
+        if !(c.is_alphanumeric() || c == '#') {
+            return None;
+        }
+    }
+    None
+}
+
+/// MSBuild `$(Property)`, `@(Items)`, `%(Metadata)`: end (exclusive).
+fn msbuild_ref(line: &[char], i: usize) -> Option<usize> {
+    if matches!(line[i], '$' | '@' | '%') && line.get(i + 1) == Some(&'(') {
+        balanced(line, i + 1, '(', ')', '\0')
+    } else {
+        None
+    }
+}
+
+/// XML: tag names as keywords, attribute names as types, values as strings
+/// (entities and MSBuild `$(…)` inside them marked), comments, and text with
+/// its entities. `st` carries an open comment, tag or value to the next line.
+fn highlight_xml(line: &[char], st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    let mut i = 0;
+    while i < n {
+        match *st {
+            State::Block => {
+                let start = i;
+                while i < n && !starts_with(line, i, "-->") {
+                    i += 1;
+                }
+                if i < n {
+                    i += 3;
+                    *st = State::Code;
+                }
+                out[start..i.min(n)].fill(Tok::Comment);
+            }
+            State::Str(s) => {
+                // An attribute value; the tag goes on after it.
+                while i < n {
+                    let c = line[i];
+                    if c == s.quote {
+                        out[i] = Tok::Quote;
+                        i += 1;
+                        *st = State::Tag;
+                        break;
+                    }
+                    let special = if c == '&' {
+                        xml_entity(line, i).map(|e| (e, Tok::Escape))
+                    } else {
+                        msbuild_ref(line, i).map(|e| (e, Tok::Interp))
+                    };
+                    match special {
+                        Some((e, tok)) => {
+                            out[i..e].fill(tok);
+                            i = e;
+                        }
+                        None => {
+                            out[i] = Tok::Str;
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            State::Tag => {
+                let c = line[i];
+                if c == '>' || ((c == '/' || c == '?') && line.get(i + 1) == Some(&'>')) {
+                    i += if c == '>' { 1 } else { 2 };
+                    *st = State::Code;
+                } else if c == '"' || c == '\'' {
+                    out[i] = Tok::Quote;
+                    i += 1;
+                    *st = State::Str(StrState {
+                        quote: c,
+                        triple: false,
+                        hashes: 0,
+                        esc: Esc::No,
+                        fmt: 0,
+                        multi: true,
+                    });
+                } else if xml_name_char(c) {
+                    let start = i;
+                    while i < n && xml_name_char(line[i]) {
+                        i += 1;
+                    }
+                    out[start..i].fill(Tok::Type);
+                } else {
+                    i += 1;
+                }
+            }
+            State::Fence(_) => *st = State::Code,
+            State::Code => {
+                let c = line[i];
+                if starts_with(line, i, "<!--") {
+                    out[i..(i + 4).min(n)].fill(Tok::Comment);
+                    i += 4;
+                    *st = State::Block;
+                } else if c == '<'
+                    && line
+                        .get(i + 1)
+                        .is_some_and(|&d| d == '/' || d == '?' || d == '!' || xml_name_char(d))
+                {
+                    // `<name`, `</name`, `<?xml`, `<!DOCTYPE`.
+                    i += 1;
+                    let decl = matches!(line.get(i), Some('?' | '!'));
+                    if matches!(line.get(i), Some('/' | '?' | '!')) {
+                        i += 1;
+                    }
+                    let start = i;
+                    while i < n && xml_name_char(line[i]) {
+                        i += 1;
+                    }
+                    out[start..i].fill(if decl { Tok::Macro } else { Tok::Keyword });
+                    *st = State::Tag;
+                } else if c == '&' {
+                    match xml_entity(line, i) {
+                        Some(e) => {
+                            out[i..e].fill(Tok::Escape);
+                            i = e;
+                        }
+                        None => i += 1,
+                    }
+                } else if let Some(e) = msbuild_ref(line, i) {
+                    out[i..e].fill(Tok::Macro);
+                    i = e;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+/// The language a fenced code block names (```` ```rust ````, ```` ```py ````):
+/// its index in `LANGS`.
+pub fn fence_lang(info: &str) -> Option<usize> {
+    let word = info
+        .split(|c: char| c.is_whitespace() || c == '{' || c == ',')
+        .next()?
+        .to_lowercase();
+    let alias = match word.as_str() {
+        "rust" => "rs",
+        "python" | "python3" => "py",
+        "javascript" | "node" => "js",
+        "typescript" => "ts",
+        "shell" | "bash" | "zsh" | "fish" | "console" => "sh",
+        "c++" => "cpp",
+        "csharp" | "c#" => "cs",
+        "golang" => "go",
+        "docker" => "dockerfile",
+        "html" | "xhtml" => "xml",
+        "yml" => "yaml",
+        w => w,
+    };
+    if alias.is_empty() {
+        return None;
+    }
+    LANGS
+        .iter()
+        .position(|l| l.exts.contains(&alias) || l.name.eq_ignore_ascii_case(alias))
+        .filter(|&i| LANGS[i].strs != Strs::Markdown)
+}
+
+/// An opening or closing code fence: (fence character, its length, info string).
+fn fence_open(line: &[char]) -> Option<(char, usize, String)> {
+    let indent = line.iter().take_while(|c| **c == ' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let ch = *line.get(indent)?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = line[indent..].iter().take_while(|c| **c == ch).count();
+    if len < 3 {
+        return None;
+    }
+    let info: String = line[indent + len..].iter().collect();
+    if ch == '`' && info.contains('`') {
+        return None;
+    }
+    Some((ch, len, info.trim().to_string()))
+}
+
+fn md_fence_closes(line: &[char], f: Fence) -> bool {
+    match fence_open(line) {
+        Some((ch, len, info)) => ch == f.ch && len >= f.len as usize && info.is_empty(),
+        None => false,
+    }
+}
+
+/// `---`, `***`, `___` (spaces allowed): a thematic break.
+fn md_rule(line: &[char]) -> bool {
+    let t: Vec<char> = line.iter().copied().filter(|c| !c.is_whitespace()).collect();
+    t.len() >= 3 && matches!(t[0], '-' | '*' | '_') && t.iter().all(|&c| c == t[0])
+}
+
+/// A list item's marker at the start of `line`: (where the marker starts,
+/// where the text starts, ordered).
+pub fn md_list_marker(line: &[char]) -> Option<(usize, usize, bool)> {
+    let indent = line.iter().take_while(|c| **c == ' ' || **c == '\t').count();
+    let c = *line.get(indent)?;
+    let (end, ordered) = if matches!(c, '-' | '*' | '+') {
+        (indent + 1, false)
+    } else if c.is_ascii_digit() {
+        let d = line[indent..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if d > 9 || !matches!(line.get(indent + d), Some('.' | ')')) {
+            return None;
+        }
+        (indent + d + 1, true)
+    } else {
+        return None;
+    };
+    match line.get(end) {
+        Some(' ' | '\t') => Some((indent, end + 1, ordered)),
+        None => Some((indent, end, ordered)),
+        _ => None,
+    }
+}
+
+/// Markdown: headings, emphasis, code (fenced blocks in their own language),
+/// links, lists, quotes, tables, HTML and its comments.
+fn highlight_md(line: &[char], st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    if let State::Fence(f) = *st {
+        if md_fence_closes(line, f) {
+            out.fill(Tok::Comment);
+            *st = State::Code;
+            return;
+        }
+        match f.lang.and_then(|i| LANGS.get(i as usize)) {
+            Some(lang) => {
+                let mut inner = f.inner.state();
+                let toks = highlight_line(lang, line, &mut inner);
+                out.copy_from_slice(&toks);
+                *st = State::Fence(Fence {
+                    inner: Inner::of(inner),
+                    ..f
+                });
+            }
+            None => out.fill(Tok::Str),
+        }
+        return;
+    }
+    let mut i = 0;
+    if *st == State::Block {
+        while i < n && !starts_with(line, i, "-->") {
+            i += 1;
+        }
+        let end = (i + 3).min(n);
+        out[..end].fill(Tok::Comment);
+        if i >= n {
+            return;
+        }
+        *st = State::Code;
+        i = end;
+        return md_inline(line, i, st, out);
+    }
+    if let Some((ch, len, info)) = fence_open(line) {
+        out.fill(Tok::Comment);
+        let start = line.iter().position(|c| *c != ' ' && *c != ch).unwrap_or(n);
+        let info_end = line[start..]
+            .iter()
+            .position(|c| c.is_whitespace())
+            .map_or(n, |p| start + p);
+        out[start..info_end].fill(Tok::Type);
+        *st = State::Fence(Fence {
+            ch,
+            len: len.min(255) as u8,
+            lang: fence_lang(&info).map(|i| i as u8),
+            inner: Inner::Code,
+        });
+        return;
+    }
+    let indent = line.iter().take_while(|c| **c == ' ').count();
+    if indent < 4 {
+        // `# Heading` .. `###### Heading`
+        let hashes = line[indent..].iter().take_while(|c| **c == '#').count();
+        if (1..=6).contains(&hashes) && matches!(line.get(indent + hashes), None | Some(' ' | '\t')) {
+            out.fill(Tok::Heading);
+            return;
+        }
+        // Setext underline (`===`) and thematic breaks (`---`, `***`).
+        let rest: Vec<char> = line[indent..].iter().copied().filter(|c| !c.is_whitespace()).collect();
+        if !rest.is_empty() && rest.iter().all(|&c| c == '=') {
+            out.fill(Tok::Heading);
+            return;
+        }
+        if md_rule(line) {
+            out.fill(Tok::Comment);
+            return;
+        }
+    }
+    // Quote markers, possibly nested: `> > text`.
+    loop {
+        let sp = line[i..].iter().take_while(|c| **c == ' ').count();
+        if sp < 4 && line.get(i + sp) == Some(&'>') {
+            out[i + sp] = Tok::Macro;
+            i += sp + 1;
+        } else {
+            break;
+        }
+    }
+    let after_quote = i;
+    let rest = &line[after_quote..];
+    if let Some((m, text, ordered)) = md_list_marker(rest) {
+        let (m, text) = (after_quote + m, after_quote + text);
+        out[m..text.min(n)].fill(if ordered { Tok::Number } else { Tok::Macro });
+        i = text;
+        // Task list: `- [ ]`, `- [x]`.
+        if i + 2 < n && line[i] == '[' && matches!(line[i + 1], ' ' | 'x' | 'X') && line[i + 2] == ']' {
+            out[i..i + 3].fill(Tok::Macro);
+            i += 3;
+        }
+    } else if rest.first() == Some(&'|') {
+        // A table row: the pipes dim; a separator row (`|---|:-:|`) all dim.
+        if rest.iter().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')) {
+            out[after_quote..].fill(Tok::Comment);
+            return;
+        }
+    }
+    md_inline(line, i, st, out);
+}
+
+/// Inline Markdown from `i`: code spans, emphasis, links, autolinks, HTML.
+fn md_inline(line: &[char], mut i: usize, st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    let word_char = |k: usize| line.get(k).is_some_and(|c| c.is_alphanumeric());
+    while i < n {
+        let c = line[i];
+        match c {
+            '\\' if line.get(i + 1).is_some_and(|c| c.is_ascii_punctuation()) => {
+                out[i..i + 2].fill(Tok::Escape);
+                i += 2;
+            }
+            '|' => {
+                out[i] = Tok::Comment;
+                i += 1;
+            }
+            '`' => {
+                let run = line[i..].iter().take_while(|c| **c == '`').count();
+                let close = (i + run..n).find(|&k| {
+                    line[k] == '`'
+                        && line[k..].iter().take_while(|c| **c == '`').count() == run
+                        && (k == 0 || line[k - 1] != '`')
+                });
+                match close {
+                    Some(k) => {
+                        out[i..i + run].fill(Tok::Quote);
+                        out[i + run..k].fill(Tok::Str);
+                        out[k..k + run].fill(Tok::Quote);
+                        i = k + run;
+                    }
+                    None => i += run,
+                }
+            }
+            '<' if starts_with(line, i, "<!--") => {
+                let start = i;
+                match (i + 4..n).find(|&k| starts_with(line, k, "-->")) {
+                    Some(k) => {
+                        out[start..k + 3].fill(Tok::Comment);
+                        i = k + 3;
+                    }
+                    None => {
+                        out[start..].fill(Tok::Comment);
+                        *st = State::Block;
+                        return;
+                    }
+                }
+            }
+            '<' if line.get(i + 1).is_some_and(|d| *d == '/' || d.is_ascii_alphabetic()) => {
+                let Some(end) = line[i..].iter().position(|c| *c == '>').map(|p| i + p + 1) else {
+                    i += 1;
+                    continue;
+                };
+                let inner: String = line[i + 1..end - 1].iter().collect();
+                if inner.contains("://") || inner.starts_with("mailto:") {
+                    // An autolink: <https://…>
+                    out[i] = Tok::Comment;
+                    out[i + 1..end - 1].fill(Tok::Url);
+                    out[end - 1] = Tok::Comment;
+                } else {
+                    md_tag(line, i, end, out);
+                }
+                i = end;
+            }
+            '!' | '[' => {
+                let open = if c == '!' { i + 1 } else { i };
+                if line.get(open) != Some(&'[') {
+                    i += 1;
+                    continue;
+                }
+                let Some(close) = (open + 1..n).find(|&k| line[k] == ']' && line[k - 1] != '\\') else {
+                    i += 1;
+                    continue;
+                };
+                let target = match line.get(close + 1) {
+                    Some('(') => balanced(line, close + 1, '(', ')', '\0'),
+                    Some('[') => line[close + 1..].iter().position(|c| *c == ']').map(|p| close + 2 + p),
+                    // `[id]: url`, a link reference definition.
+                    Some(':') if line[..open].iter().all(|c| c.is_whitespace()) => Some(n),
+                    _ => None,
+                };
+                match target {
+                    Some(end) => {
+                        out[i..=open].fill(Tok::Comment);
+                        md_inline_range(line, open + 1, close, Tok::Func, out);
+                        out[close] = Tok::Comment;
+                        out[close + 1..end].fill(Tok::Url);
+                        i = end;
+                    }
+                    None => i += 1,
+                }
+            }
+            '*' | '_' => {
+                let run = line[i..].iter().take_while(|k| **k == c).count();
+                let len = run.min(3);
+                // Opens before a non-space; `_` not inside a word (snake_case).
+                let opens = line.get(i + run).is_some_and(|k| !k.is_whitespace())
+                    && !(c == '_' && word_char(i.wrapping_sub(1)));
+                if !opens {
+                    i += run;
+                    continue;
+                }
+                let marker: Vec<char> = std::iter::repeat_n(c, len).collect();
+                let close = (i + len + 1..n).find(|&k| {
+                    line[k..].starts_with(&marker)
+                        && !line[k - 1].is_whitespace()
+                        && !(c == '_' && word_char(k + len))
+                        && (len > 1 || line.get(k + 1) != Some(&c))
+                });
+                match close {
+                    Some(k) => {
+                        out[i..i + len].fill(Tok::Comment);
+                        out[i + len..k].fill(if len >= 2 { Tok::Strong } else { Tok::Emph });
+                        out[k..k + len].fill(Tok::Comment);
+                        i = k + len;
+                    }
+                    None => i += run,
+                }
+            }
+            'h' if starts_with(line, i, "https://") || starts_with(line, i, "http://") => {
+                let end = (i..n)
+                    .find(|&k| line[k].is_whitespace() || matches!(line[k], ')' | '>' | '"' | '\''))
+                    .unwrap_or(n);
+                out[i..end].fill(Tok::Url);
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// Link text: `tok`, with code spans inside still marked.
+fn md_inline_range(line: &[char], from: usize, to: usize, tok: Tok, out: &mut [Tok]) {
+    out[from..to].fill(tok);
+    let mut k = from;
+    while k < to {
+        if line[k] == '`' {
+            if let Some(e) = (k + 1..to).find(|&e| line[e] == '`') {
+                out[k] = Tok::Quote;
+                out[k + 1..e].fill(Tok::Str);
+                out[e] = Tok::Quote;
+                k = e;
+            }
+        }
+        k += 1;
+    }
+}
+
+/// An HTML tag in Markdown, `line[from..to]` from `<` to `>`.
+fn md_tag(line: &[char], from: usize, to: usize, out: &mut [Tok]) {
+    let mut k = from + 1;
+    if line.get(k) == Some(&'/') {
+        k += 1;
+    }
+    let name_end = (k..to).find(|&e| !xml_name_char(line[e])).unwrap_or(to);
+    out[k..name_end].fill(Tok::Keyword);
+    k = name_end;
+    while k < to {
+        let c = line[k];
+        if c == '"' || c == '\'' {
+            let e = (k + 1..to).find(|&e| line[e] == c).unwrap_or(to - 1);
+            out[k] = Tok::Quote;
+            out[k + 1..e].fill(Tok::Str);
+            out[e] = Tok::Quote;
+            k = e + 1;
+        } else if xml_name_char(c) {
+            let e = (k..to).find(|&e| !xml_name_char(line[e])).unwrap_or(to);
+            out[k..e].fill(Tok::Type);
+            k = e;
+        } else {
+            k += 1;
+        }
     }
 }
 
@@ -708,10 +1908,137 @@ fn scan_string(line: &[char], mut i: usize, s: StrState, out: &mut [Tok], st: &m
     n
 }
 
+/// `.env`: `KEY=value` (also `KEY: value`) with keys as types, `export` as a
+/// keyword and `#` comments. Values: `"…"` with escapes and `$VAR`/`${VAR}`,
+/// `'…'` and `` `…` `` as written, all three able to run over lines; a bare
+/// value is a string up to ` #`, or a number or `true`/`false` when that is
+/// all it is. `st` carries an open quoted value to the next line.
+fn highlight_env(line: &[char], st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    let skip_ws = |mut i: usize| {
+        while i < n && line[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    if let State::Str(s) = *st {
+        let i = scan_string(line, 0, s, out, st);
+        env_comment(line, i, out);
+        return;
+    }
+    *st = State::Code;
+    let mut i = skip_ws(0);
+    if i >= n {
+        return;
+    }
+    if line[i] == '#' {
+        out[i..].fill(Tok::Comment);
+        return;
+    }
+    let export = starts_with(line, i, "export") && line.get(i + 6).is_some_and(|c| c.is_whitespace());
+    if export {
+        out[i..i + 6].fill(Tok::Keyword);
+        i = skip_ws(i + 6);
+    }
+    let key = i;
+    while i < n && (line[i].is_alphanumeric() || matches!(line[i], '_' | '.' | '-')) {
+        i += 1;
+    }
+    let key_end = i;
+    i = skip_ws(i);
+    let assign = match line.get(i) {
+        Some('=') => true,
+        Some(':') => line.get(i + 1).is_none_or(|c| c.is_whitespace()),
+        _ => false,
+    };
+    if key_end == key || !assign {
+        // `export NAME` (no value) still names a variable.
+        if export && key_end > key && i >= n {
+            out[key..key_end].fill(Tok::Type);
+        }
+        return;
+    }
+    out[key..key_end].fill(Tok::Type);
+    i = skip_ws(i + 1);
+    let quoted = |q, esc, fmt| StrState {
+        quote: q,
+        triple: false,
+        hashes: 0,
+        esc,
+        fmt,
+        multi: true,
+    };
+    let s = match line.get(i) {
+        Some('"') => Some(quoted('"', Esc::Yes, FMT_SHELL)),
+        Some(&q @ ('\'' | '`')) => Some(quoted(q, Esc::No, 0)),
+        _ => None,
+    };
+    if let Some(s) = s {
+        out[i] = Tok::Quote;
+        *st = State::Str(s);
+        let e = scan_string(line, i + 1, s, out, st);
+        env_comment(line, e, out);
+        return;
+    }
+    // A bare value ends at whitespace followed by `#`.
+    let start = i;
+    let mut end = (start + 1..n)
+        .find(|&j| line[j] == '#' && line[j - 1].is_whitespace())
+        .unwrap_or(n);
+    out[end..].fill(Tok::Comment);
+    while end > start && line[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    let value: String = line[start..end].iter().collect();
+    // `3000`, `-1`, `0.5`, `1_000`, `1e6` (not `127.0.0.1`, nor `inf`).
+    let digits = value.strip_prefix(['-', '+']).unwrap_or(&value);
+    let number = digits.starts_with(|c: char| c.is_ascii_digit()) && digits.replace('_', "").parse::<f64>().is_ok();
+    if number {
+        out[start..end].fill(Tok::Number);
+    } else if matches!(value.to_ascii_lowercase().as_str(), "true" | "false") {
+        out[start..end].fill(Tok::Keyword);
+    } else {
+        let mut j = start;
+        while j < end {
+            if line[j] == '$' {
+                if let Some(e) = shell_var(line, j).filter(|&e| e <= end) {
+                    out[j..e].fill(Tok::Interp);
+                    j = e;
+                    continue;
+                }
+            }
+            out[j] = Tok::Str;
+            j += 1;
+        }
+    }
+}
+
+/// After a closed quoted value: a `#` comment (after whitespace) to the end of the line.
+fn env_comment(line: &[char], from: usize, out: &mut [Tok]) {
+    if let Some(p) = line[from.min(line.len())..].iter().position(|c| !c.is_whitespace()) {
+        let j = from + p;
+        if line[j] == '#' && (j == 0 || line[j - 1].is_whitespace()) {
+            out[j..].fill(Tok::Comment);
+        }
+    }
+}
+
 pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok> {
     let n = line.len();
     let mut out = vec![Tok::Normal; n];
     if lang.plain {
+        return out;
+    }
+    if lang.strs == Strs::Xml {
+        highlight_xml(line, st, &mut out);
+        return out;
+    }
+    if lang.strs == Strs::Markdown {
+        highlight_md(line, st, &mut out);
+        return out;
+    }
+    if lang.strs == Strs::Env {
+        highlight_env(line, st, &mut out);
         return out;
     }
     let mut i = 0;
@@ -735,7 +2062,7 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
                 i = scan_string(line, i, s, &mut out, st);
                 continue;
             }
-            State::Code => {}
+            State::Code | State::Tag | State::Fence(_) => {}
         }
         let c = line[i];
         if let Some((s, _)) = lang.block {
@@ -760,6 +2087,36 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
             }
             out[start..i].fill(Tok::Macro);
             continue;
+        }
+        if lang.directives && c == '#' && line[..i].iter().all(|c| c.is_whitespace()) {
+            // `#region`, `#if DEBUG`, `#nullable enable`.
+            let start = i;
+            i += 1;
+            while i < n && line[i].is_alphanumeric() {
+                i += 1;
+            }
+            out[start..i].fill(Tok::Macro);
+            continue;
+        }
+        if lang.vars && c == '$' {
+            if let Some(e) = shell_var(line, i) {
+                out[i..e].fill(Tok::Macro);
+                i = e;
+                continue;
+            }
+        }
+        if lang.strs == Strs::Sql {
+            if c == '"' || c == '`' {
+                // A quoted name: no keywords inside.
+                let e = line[i + 1..].iter().position(|&q| q == c).map_or(n, |p| i + p + 2);
+                i = e;
+                continue;
+            }
+            if let Some(e) = sql_param(line, i) {
+                out[i..e].fill(Tok::Macro);
+                i = e;
+                continue;
+            }
         }
         if let Some((open, s)) = string_open(lang.strs, line, i) {
             let e = (i + open).min(n);
@@ -789,10 +2146,14 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
             while i < n && (line[i].is_alphanumeric() || line[i] == '_') {
                 i += 1;
             }
-            let word: String = line[start..i].iter().collect();
+            let mut word: String = line[start..i].iter().collect();
+            if lang.ci {
+                word.make_ascii_lowercase();
+            }
             let w = word.as_str();
             let next_nb = line[i..].iter().find(|c| !c.is_whitespace()).copied();
-            let tok = if lang.keywords.contains(&w) {
+            let keyword = lang.keywords.contains(&w) && (!lang.lead || at_lead(line, start, w));
+            let tok = if keyword {
                 Tok::Keyword
             } else if lang.types.contains(&w) {
                 Tok::Type
@@ -922,6 +2283,205 @@ mod tests {
             shape(&hl(&SHELL, r#"echo "$HOME ${x:-1} $(pwd) \$" '$x'"#)),
             ".....qiiiiisiiiiiiisiiiiiiseeq.qssq"
         );
+    }
+
+    /// One letter per character: k keyword, t type, m macro/variable, f function,
+    /// c comment, n number, then the string letters of `shape`.
+    fn kinds(t: &[Tok]) -> String {
+        t.iter()
+            .map(|t| match t {
+                Tok::Keyword => 'k',
+                Tok::Type => 't',
+                Tok::Macro => 'm',
+                Tok::Func => 'f',
+                Tok::Comment => 'c',
+                Tok::Number => 'n',
+                Tok::Quote => 'q',
+                Tok::Str => 's',
+                Tok::Escape => 'e',
+                Tok::Interp => 'i',
+                Tok::Normal => '.',
+                Tok::Heading => 'h',
+                Tok::Strong => 'b',
+                Tok::Emph => 'e',
+                Tok::Url => 'u',
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_new_languages_by_name() {
+        for (f, lang) in [
+            ("Dockerfile", "Dockerfile"),
+            ("Dockerfile.flyway", "Dockerfile"),
+            ("dockerfile.dev", "Dockerfile"),
+            ("api.Dockerfile", "Dockerfile"),
+            ("Containerfile", "Dockerfile"),
+            ("Dockerfile.dockerignore", "Metin"),
+            ("schema.sql", "SQL"),
+            ("Program.cs", "C#"),
+            ("App.csproj", "XML"),
+            ("Directory.Build.props", "XML"),
+            ("App.sln", "Solution"),
+            ("App.slnx", "XML"),
+            ("analysis.ipynb", "JSON"),
+            (".env", "Dotenv"),
+            (".env.template", "Dotenv"),
+            (".env.local", "Dotenv"),
+            (".env.example", "Dotenv"),
+            (".env.production.local", "Dotenv"),
+            ("prod.env", "Dotenv"),
+            (".env.json", "JSON"),
+            (".envrc", "Metin"),
+        ] {
+            assert_eq!(detect(Path::new(f)).name, lang, "{}", f);
+        }
+    }
+
+    #[test]
+    fn dotenv_lines() {
+        let k = |s: &str| kinds(&hl(&DOTENV, s));
+        assert_eq!(k("# comment"), "ccccccccc");
+        assert_eq!(
+            k("export API_KEY=\"abc $HOME\\n\" # note"),
+            "kkkkkk.ttttttt.qssssiiiiieeq.cccccc"
+        );
+        assert_eq!(k("PORT=3000"), "tttt.nnnn");
+        assert_eq!(k("DEBUG=true # on"), "ttttt.kkkk.cccc");
+        // `#` only starts a comment after whitespace.
+        assert_eq!(k("URL=http://x/#a ${HOST}:8080"), "ttt.ssssssssssssiiiiiiisssss");
+        assert_eq!(k("NAME='it $x'"), "tttt.qsssssq");
+        assert_eq!(k("HOST=127.0.0.1"), "tttt.sssssssss");
+        assert_eq!(k("KEY: value"), "ttt..sssss");
+        assert_eq!(k("  A=1"), "..t.n");
+        assert_eq!(k("export PATH"), "kkkkkk.tttt");
+        assert_eq!(k("just text"), ".........");
+        // Quoted values go on over lines.
+        let mut st = State::default();
+        let a: Vec<char> = "CERT=\"-----BEGIN".chars().collect();
+        highlight_line(&DOTENV, &a, &mut st);
+        assert!(matches!(st, State::Str(_)));
+        let b: Vec<char> = "abc\" # end".chars().collect();
+        assert_eq!(kinds(&highlight_line(&DOTENV, &b, &mut st)), "sssq.ccccc");
+        assert_eq!(st, State::Code);
+        assert_eq!(fence_lang("env").map(|i| LANGS[i].name), Some("Dotenv"));
+        assert_eq!(fence_lang("dotenv").map(|i| LANGS[i].name), Some("Dotenv"));
+    }
+
+    #[test]
+    fn sql_line() {
+        assert_eq!(
+            kinds(&hl(
+                &SQL,
+                "select id, \"Order\" from t where n = 'it''s' and x::int = @p -- c"
+            )),
+            "kkkkkk.............kkkk...kkkkk.....qssqqsq.kkk....ttt...mm.cccc"
+        );
+        // Keywords in any case; capitals aren't types.
+        assert_eq!(kinds(&hl(&SQL, "SELECT Name FROM Users")), "kkkkkk......kkkk......");
+        let mut st = State::default();
+        let a: Vec<char> = "insert into t values ('line one".chars().collect();
+        highlight_line(&SQL, &a, &mut st);
+        assert!(matches!(st, State::Str(_)), "SQL strings go on over lines");
+    }
+
+    #[test]
+    fn dockerfile_line() {
+        assert_eq!(
+            kinds(&hl(&DOCKERFILE, "FROM node:20 AS build")),
+            "kkkk......nn.kk......"
+        );
+        // Instructions only lead a line: `from` in a RUN line is a word.
+        assert_eq!(
+            kinds(&hl(&DOCKERFILE, "RUN echo from $HOME ${A:-b} \"$X\"")),
+            "kkk...........mmmmm.mmmmmmm.qiiq"
+        );
+        assert_eq!(kinds(&hl(&DOCKERFILE, "onbuild run make")), "kkkkkkk.kkk.....");
+    }
+
+    #[test]
+    fn csharp_strings() {
+        assert_eq!(
+            shape(&hl(&CSHARP, r#"var s = $"Hi {user.Name}, {{x}}\n";"#)),
+            "........qqsssiiiiiiiiiiisseeseeeeq."
+        );
+        assert_eq!(shape(&hl(&CSHARP, r#"@"C:\dir\" + 'x'"#)), "qqsssssssq...qsq");
+        let mut st = State::default();
+        let a: Vec<char> = r#"var j = """{"a": 1}"#.chars().collect();
+        highlight_line(&CSHARP, &a, &mut st);
+        assert!(matches!(st, State::Str(_)), "raw strings go on over lines");
+        let b: Vec<char> = r#"""";"#.chars().collect();
+        highlight_line(&CSHARP, &b, &mut st);
+        assert_eq!(st, State::Code);
+        assert_eq!(kinds(&hl(&CSHARP, "  #region Setup")), "..mmmmmmm.ttttt");
+    }
+
+    #[test]
+    fn xml_tags() {
+        assert_eq!(
+            kinds(&hl(&XML, r#"<Item Include="$(Out)\a&amp;b.dll" />"#)),
+            ".kkkk.ttttttt.qiiiiiisseeeeesssssq..."
+        );
+        assert_eq!(kinds(&hl(&XML, r#"<?xml version="1.0"?>"#)), "..mmm.ttttttt.qsssq..");
+        assert_eq!(kinds(&hl(&XML, "<A>$(B) &lt; it's</A>")), ".k.mmmm.eeee.......k.");
+        // Comments and tags go on over lines.
+        let mut st = State::default();
+        highlight_line(&XML, &"<!-- a".chars().collect::<Vec<_>>(), &mut st);
+        assert_eq!(st, State::Block);
+        let t = highlight_line(&XML, &"b --> <Tag".chars().collect::<Vec<_>>(), &mut st);
+        assert_eq!(kinds(&t), "ccccc..kkk");
+        assert_eq!(st, State::Tag);
+        let t = highlight_line(&XML, &"  Name='x'>text".chars().collect::<Vec<_>>(), &mut st);
+        assert_eq!(kinds(&t), "..tttt.qsq.....");
+        assert_eq!(st, State::Code);
+    }
+
+    #[test]
+    fn sln_line() {
+        assert_eq!(
+            kinds(&hl(&SLN, r#"Project("{FAE0}") = "App", "src\App.csproj""#)),
+            "kkkkkkk.qssssssq....qsssq..qssssssssssssssq"
+        );
+    }
+
+    #[test]
+    fn markdown_lines() {
+        assert_eq!(kinds(&hl(&MARKDOWN, "## Title")), "hhhhhhhh");
+        assert_eq!(
+            kinds(&hl(&MARKDOWN, "**b** *e* `c` [t](u) a_b_c")),
+            "ccbcc.cec.qsq.cfcuuu......"
+        );
+        assert_eq!(kinds(&hl(&MARKDOWN, "- [x] done")), "mmmmm.....");
+        assert_eq!(kinds(&hl(&MARKDOWN, "> 1. quoted")), "m.nnn......");
+        assert_eq!(kinds(&hl(&MARKDOWN, "see https://x.io now")), "....uuuuuuuuuuuu....");
+        assert_eq!(kinds(&hl(&MARKDOWN, "| a | b |")), "c...c...c");
+        assert_eq!(kinds(&hl(&MARKDOWN, "<p align=\"center\">")), ".k.ttttt.qssssssq.");
+    }
+
+    #[test]
+    fn markdown_fences_use_their_language() {
+        let mut st = State::default();
+        let line = |s: &str| s.chars().collect::<Vec<_>>();
+        let t = highlight_line(&MARKDOWN, &line("```rust"), &mut st);
+        assert_eq!(kinds(&t), "ccctttt");
+        assert!(matches!(st, State::Fence(_)));
+        let t = highlight_line(&MARKDOWN, &line("let s = \"# not a heading"), &mut st);
+        assert_eq!(&kinds(&t)[..4], "kkk.");
+        // The string goes on inside the fence's language, not as Markdown.
+        let t = highlight_line(&MARKDOWN, &line("still\";"), &mut st);
+        assert_eq!(kinds(&t), "sssssq.");
+        let t = highlight_line(&MARKDOWN, &line("```"), &mut st);
+        assert_eq!(kinds(&t), "ccc");
+        assert_eq!(st, State::Code);
+        // An unknown language: plain code colour.
+        highlight_line(&MARKDOWN, &line("~~~text"), &mut st);
+        assert_eq!(kinds(&highlight_line(&MARKDOWN, &line("x = 1"), &mut st)), "sssss");
+        highlight_line(&MARKDOWN, &line("~~~"), &mut st);
+        // HTML comments over lines.
+        highlight_line(&MARKDOWN, &line("<!-- a"), &mut st);
+        assert_eq!(st, State::Block);
+        let t = highlight_line(&MARKDOWN, &line("b --> **x**"), &mut st);
+        assert_eq!(kinds(&t), "ccccc.ccbcc");
     }
 
     #[test]
