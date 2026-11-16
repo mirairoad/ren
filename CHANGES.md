@@ -212,6 +212,10 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: First release, 0.4.0
+- **`v0.4.0` is ren's first release**, with prebuilt binaries for Linux x86_64, macOS arm64 and macOS x86_64, so `install.sh` downloads one and nobody needs cargo. The version moves on from zetsu's 0.3.0, which the fork started from.
+- README: the "no releases yet" note is gone; the installer section says it downloads a binary; downloading by hand needs `chmod +x`, and on macOS `xattr -d com.apple.quarantine` for a browser download (ren isn't notarized; `curl` doesn't quarantine).
+
 ### 2026-11-16: CI and releases: macOS and Linux only
 - **The build matrix is Linux x86_64 (musl), macOS arm64 and macOS x86_64**, and a release attaches those three binaries. Windows is paused, not removed: its code paths and `install.ps1` stay, and the matrix entry is kept as a comment in `build.yml`. It doesn't compile at the moment anyway (the embedded terminal, `term.rs`, is Unix-only), which is why every CI run so far had failed.
 - **Two clippy errors that only CI saw** (its stable Rust is newer than the local 1.97): a range loop in `Buffer::get_text` that only indexed `lines`, now a slice loop; and `openpty` taking `&mut ws` where Linux's libc wants `*const winsize` (macOS's wants `*mut`), now a raw pointer that fits both.
