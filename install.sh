@@ -23,12 +23,6 @@ case "$(uname -m)" in
     *) echo "Unsupported architecture: $(uname -m)"; exit 1 ;;
 esac
 
-if [ -z "$LOCAL" ] && [ "$os" = linux ] && [ "$arch" = arm64 ]; then
-    echo "There is no prebuilt binary for Linux arm64 yet. Build from source:"
-    echo "  cargo install --git https://github.com/$REPO"
-    exit 1
-fi
-
 dl() {
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$1" -o "$2"
@@ -44,7 +38,17 @@ if [ -n "$LOCAL" ]; then
     cp "$SRC/target/release/ren" "$BIN.tmp"
 else
     echo "Downloading ren..."
-    dl "https://github.com/$REPO/releases/latest/download/ren-$os-$arch" "$BIN.tmp"
+    # Released: Linux x86_64 and arm64, macOS Apple Silicon. Anything else
+    # (an Intel Mac, since 0.4.0) builds from source.
+    if ! dl "https://github.com/$REPO/releases/latest/download/ren-$os-$arch" "$BIN.tmp"; then
+        rm -f "$BIN.tmp"
+        echo "The latest ren release has no binary for $os $arch. Build it from source"
+        echo "(needs Rust from https://rustup.rs and a C compiler):"
+        echo "  git clone https://github.com/$REPO && cd ren && ./install.sh --local"
+        echo "or, for the binary only:"
+        echo "  cargo install --git https://github.com/$REPO"
+        exit 1
+    fi
 fi
 chmod +x "$BIN.tmp"
 mv "$BIN.tmp" "$BIN"
