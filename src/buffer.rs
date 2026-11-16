@@ -421,8 +421,8 @@ impl Buffer {
         }
         out.extend(&self.lines[a.1][a.0.min(self.line_len(a.1))..]);
         out.push('\n');
-        for y in a.1 + 1..b.1 {
-            out.extend(&self.lines[y]);
+        for line in self.lines.get(a.1 + 1..b.1).unwrap_or_default() {
+            out.extend(line);
             out.push('\n');
         }
         out.extend(&self.lines[b.1][..bx]);

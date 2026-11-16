@@ -212,6 +212,11 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: CI and releases: macOS and Linux only
+- **The build matrix is Linux x86_64 (musl), macOS arm64 and macOS x86_64**, and a release attaches those three binaries. Windows is paused, not removed: its code paths and `install.ps1` stay, and the matrix entry is kept as a comment in `build.yml`. It doesn't compile at the moment anyway (the embedded terminal, `term.rs`, is Unix-only), which is why every CI run so far had failed.
+- **Two clippy errors that only CI saw** (its stable Rust is newer than the local 1.97): a range loop in `Buffer::get_text` that only indexed `lines`, now a slice loop; and `openpty` taking `&mut ws` where Linux's libc wants `*const winsize` (macOS's wants `*mut`), now a raw pointer that fits both.
+- README: the install section says macOS and Linux, with Windows paused; the prebuilt table and the source requirements drop Windows; "Building a release" lists the three targets.
+
 ### 2026-11-16: Session checkpoints, `ren --resume`
 - **Each session keeps its last 3 states**: the latest (`session.json`, `unsaved/`) and two checkpoints before it in `1/` and `2/`. A new checkpoint starts when what's open (projects, and tabs other than previews; order and cursors don't count) changes after staying the same for a minute. Quicker changes just update the latest state, so the three cover layouts that lasted, not every file opened in passing. A clean quit that throws unsaved text away (`:qa!`) also starts one, so that text stays one step back.
 - The latest state is copied, not moved, into `1/`, so a crash between the copy and the next write still finds it. A session whose `session.json` is lost is still listed from its checkpoints.

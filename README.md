@@ -68,15 +68,9 @@ What you have open (every project, its tabs and cursors, and unsaved text) is sa
 
 ## Installation
 
-> No ren releases are published yet, so the one-line installers below won't work until they are. Use **From source**.
+> No ren releases are published yet, so the one-line installer below won't work until they are. Use **From source**.
 
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/mirairoad/ren/main/install.ps1 | iex
-```
-
-Installs to `%LOCALAPPDATA%\Programs\ren`, adds it to the user `PATH` and creates Desktop and Start Menu shortcuts. Windows Terminal is used when available.
+ren is built and released for **macOS and Linux**. Windows is paused for now: its code paths and installer stay in the repo, but it doesn't build yet (the embedded terminal is Unix-only), and releases have no Windows binary.
 
 ### Linux / macOS
 
@@ -95,14 +89,13 @@ Binaries for every release are available on the [Releases](https://github.com/mi
 
 | Platform | Asset |
 |---|---|
-| Windows x86_64 | `ren-windows-x86_64.exe` |
 | Linux x86_64 | `ren-linux-x86_64` |
 | macOS Apple Silicon | `ren-macos-arm64` |
 | macOS Intel | `ren-macos-x86_64` |
 
 ### From source
 
-Requires a stable Rust toolchain ([rustup.rs](https://rustup.rs)) and a C compiler (for `ring`, the TLS library behind the debug-adapter downloader): the Visual Studio Build Tools with the C++ workload on Windows (already needed by the MSVC Rust toolchain), `gcc` or `clang` on Linux (`build-essential` on Debian/Ubuntu), and the Xcode Command Line Tools on macOS (`xcode-select --install`).
+Requires a stable Rust toolchain ([rustup.rs](https://rustup.rs)) and a C compiler (for `ring`, the TLS library behind the debug-adapter downloader): `gcc` or `clang` on Linux (`build-essential` on Debian/Ubuntu), and the Xcode Command Line Tools on macOS (`xcode-select --install`).
 
 ```sh
 git clone https://github.com/mirairoad/ren
@@ -414,7 +407,7 @@ Format on save sends `textDocument/formatting` to the file's language server and
 
 ## Building a release
 
-Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` builds and tests all targets; pushing a version tag also publishes a GitHub Release with the binaries attached:
+Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` and every pull request runs `cargo fmt --check` and clippy, and builds and tests Linux x86_64 (static, musl), macOS arm64 and macOS x86_64; pushing a version tag also publishes a GitHub Release with those three binaries attached:
 
 ```sh
 git tag v0.1.0
