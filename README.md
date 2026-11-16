@@ -457,8 +457,8 @@ Format on save sends `textDocument/formatting` to the file's language server and
 Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` and every pull request runs `cargo fmt --check` and clippy, and builds and tests Linux x86_64 and arm64 (static, musl; arm64 on GitHub's Arm runner) and macOS arm64; pushing a version tag also publishes a GitHub Release with those three binaries attached:
 
 ```sh
-git tag v0.4.1
-git push origin v0.4.1
+git tag v0.4.2
+git push origin v0.4.2
 ```
 
 Bump `version` in `Cargo.toml` first: the welcome screen and `ren --version` show it.

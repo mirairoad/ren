@@ -212,6 +212,10 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: Release 0.4.2
+- **Version 0.4.2** (`Cargo.toml`, the README's tag example). New since 0.4.1: workspace files (`ren name.workspace.json`, `:workspace`), and the fix for the crash when switching to an earlier project with unsaved text (both in the entry below).
+- **0.4.1 was never tagged**, so it never got a GitHub release: 0.4.0 stayed the latest, and `install.sh` kept downloading it. 0.4.2 is the first release since 0.4.0 and carries everything listed under 0.4.1 too (the new highlighters and language servers, Markdown's rendered view, the panel key without kitty keys, `:q` keeping ren open, the Linux arm64 binary and no Intel Mac one). The release is the merge commit on `main`, tagged `v0.4.2`, as 0.4.0 was.
+
 ### 2026-11-16: Workspace files
 - **`ren name.workspace.json`** opens every folder the file lists as a project, as that workspace was left. The file is `{ "open": ["/work/api", "~/work/web", "../shared"] }`: comments and trailing commas allowed, `~/` is home, a relative path starts from the file's folder. A file counts as a workspace by its name (`*.workspace.json`), so `ren package.json` still just opens the file.
 - **It remembers where it was** through the session: the window's session is tagged with the workspace file, so opening the file again finds it and brings back each project's tabs, cursors, scroll, tree, panel and unsaved text, and the project on screen. The first time, the folders open fresh with their trees shown. In the session list the session reads `team: api + web + shared`; restoring it from there ties the window to the file again, and so does `:reload`.
