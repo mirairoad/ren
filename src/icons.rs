@@ -27,10 +27,9 @@ pub fn file(name: &str) -> (char, Color) {
         "license" | "license.md" | "licence" => return ('\u{e60a}', rgb(0xd0, 0xbf, 0x41)),
         "cargo.lock" | "uv.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" | "deno.lock"
         | "poetry.lock" => return ('\u{f023}', GREY),
-        ".env" | ".envrc" => return ('\u{f084}', rgb(0xfa, 0xf7, 0x43)),
         _ => {}
     }
-    if lower.starts_with(".env.") {
+    if lower == ".envrc" || crate::highlight::is_dotenv(&lower) {
         return ('\u{f084}', rgb(0xfa, 0xf7, 0x43));
     }
     let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
@@ -79,6 +78,8 @@ mod tests {
         assert_eq!(file("Program.cs").0, '\u{e648}');
         assert_eq!(file("App.sln").0, '\u{e70c}');
         assert_eq!(file(".env.local").0, '\u{f084}');
+        assert_eq!(file(".env.template").0, '\u{f084}');
+        assert_eq!(file("prod.env").0, '\u{f084}');
         assert_eq!(file("Cargo.lock").0, '\u{f023}');
         assert_eq!(file("noext").0, '\u{f016}');
     }

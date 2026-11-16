@@ -212,6 +212,12 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: .env highlighting
+- **`.env` files** are highlighted (status bar: `Dotenv`): `.env`, `.env.template`, `.env.local`, `.env.example`, `.env.production.local` and any other `.env.<name>`, plus `*.env`. A variant ending in a language's own extension (`.env.json`, `.env.sh`) stays that language; `.envrc` is a shell script, not a dotenv file.
+  - Keys in the type colour, `export` as a keyword, `#` comments (whole lines, and after a value when a space comes before the `#`, so `https://x/#frag` stays part of the value).
+  - Values: `"…"` with escapes and `$VAR`/`${VAR}` marked, `'…'` and `` `…` `` as written; all three can run over several lines (certificates, keys). A bare value is a string, with `$VAR` marked, or a number (`3000`, not `127.0.0.1`) or `true`/`false` when that's all it is. `KEY: value` works too.
+  - Code fences marked ```` ```env ```` or ```` ```dotenv ```` in Markdown use it. The key icon now follows the same names (`prod.env` gets it, `.env.json` gets the JSON one).
+
 ### 2026-11-16: Markdown: highlighting and a rendered view
 - **Markdown highlighting**: headings (bold), `**strong**`, `*emphasis*`, `***both***`, inline code, links (text and target), autolinks and bare URLs, list markers, task boxes, quote markers, table pipes, thematic breaks, HTML tags and comments (also over several lines). Fenced code blocks are highlighted in their own language (```` ```rust ````, `py`, `sh`, `ts`, `sql`, `cs`, `xml`/`html`, `dockerfile`, …), with that language's state carried from line to line inside the fence; an unknown language gets the code colour. `snake_case` isn't emphasis.
 - **Rendered view** (`markdown.rs`): `Ctrl+Shift+V` (as in VS Code), `:preview`, or the status bar's `◧ Preview` switch shows the file rendered, `Ctrl+Shift+V` / `◧ Raw` / `Esc` goes back to the text at the same place (the rendered rows remember their source line both ways).
