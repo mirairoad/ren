@@ -212,6 +212,125 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: Session checkpoints, `ren --resume`
+- **Each session keeps its last 3 states**: the latest (`session.json`, `unsaved/`) and two checkpoints before it in `1/` and `2/`. A new checkpoint starts when what's open (projects, and tabs other than previews; order and cursors don't count) changes after staying the same for a minute. Quicker changes just update the latest state, so the three cover layouts that lasted, not every file opened in passing. A clean quit that throws unsaved text away (`:qa!`) also starts one, so that text stays one step back.
+- The latest state is copied, not moved, into `1/`, so a crash between the copy and the next write still finds it. A session whose `session.json` is lost is still listed from its checkpoints.
+- Closing every tab no longer deletes a session that had something worth keeping (it lasted a minute, or has checkpoints): the empty state is saved and the last real one becomes a checkpoint. A ren opened and closed in passing still leaves nothing.
+- **`ren --resume`** (`-r`) opens ren on the session list; `ren --resume 2` restores session 2, `ren --resume 2.1` its checkpoint one step back. `:session` shows the same list: each session, then `↳` rows for its checkpoints. `:session <n>.<k>` restores from the command line. The welcome screen points at `:session` when there are checkpoints.
+- Restoring a checkpoint takes the session over as before, and pushes the newer states back as checkpoints, so going back can be undone.
+- **Windows that go down together are all kept.** Only one session per set of projects is listed, but an interrupted one saved within a minute of the newest for the same folders now stays too (several windows closed by one terminal crash). Tested: two ren windows on the same folder, `tmux kill-session`, both listed.
+- **README**: a "How ren works" section up front (typing without vim modes or motions, the shell-style file commands, projects, sessions), and full Projects and Sessions sections (what's per project, what's shared, when sessions save, several windows, checkpoints, `ren --resume`, commands).
+- `:open /abs/path` opens the real path when it exists and the workspace has no such path (a leading `/` still means the workspace root first). Found while testing.
+- Tested in tmux (sandbox HOME): an edit, a minute, then a second file → `1/` holds the one-tab state with the unsaved copy. After `kill -9`, `ren --resume` listed the session with a `↳` row; Enter on it restored the old state with its unsaved text, and the newer state moved to `1/`. `:qa!` with unsaved text left the text in `1/`. `:session 2.1` and `ren --resume 1.1` (no such checkpoint: clear error). Unit tests for the rotation, the shape and `n.k` parsing; 55 pass.
+
+### 2026-11-13: Sessions
+- **What's open is saved as you work**, in `~/.ren/sessions/<id>/`, one folder per running ren: every project (in selector order, with the one on screen), each with its tabs, cursors and scroll, the tree (shown, width, open folders, selection), the bottom panel and focus, plus copies of unsaved text. It's written a few seconds after something changes (only when it did), into a side file that's then renamed, so a crash mid-write leaves the previous one.
+- **A crash, a killed process or a closed terminal loses at most those few seconds.** Closing the terminal window sends ren SIGHUP; ren now catches it (and SIGTERM), saves at once and leaves. A write error to the terminal does the same, instead of the clean-quit path that used to delete the unsaved copies.
+  - crossterm keeps reading a hung-up terminal forever (the read returns nothing and never "would block"), so catching SIGHUP alone left ren spinning at full CPU. The handler also puts an empty non-blocking pipe in place of stdin (`dup2`, safe in a signal handler); crossterm's read then gives up and the loop gets to save and leave.
+- **The welcome screen lists recent sessions** above the recent folders: the projects' names (`ren + alpha`), tab count, when, and in yellow `interrupted` (it didn't close cleanly) and how many tabs were unsaved. The numbers go on from sessions into folders, so `1`–`9` reach both; a click works too. Restoring opens every project of the session with its tabs and unsaved text; when ren was started empty, the session replaces the empty start, otherwise its projects join the open ones (an open folder keeps its tabs). The restored ren takes the session over and keeps saving into it.
+- One entry per set of projects (the newest; an older one stays if it holds unsaved text), at most 12 kept, the rest deleted. A run with nothing worth restoring (one project, no file tab, no typed text) leaves no session.
+- **Each running ren locks its session folder** (`File::try_lock`), so a second ren doesn't list a session that's still open, and can't take it over.
+- A clean quit keeps the session, marked clean, without unsaved copies: `:qa!` discarded them on purpose.
+- `:session` lists the sessions, `:session <n>` restores one, `:session forget <n>` deletes it. `:recover` restores the newest interrupted session with unsaved text (`:recover discard` drops its copies), and starting ren after a crash says which one to restore.
+- `:reload` goes through the same session (`ren --restore <id>`), so every project comes back in its order. A `:reload` from an older ren (which kept one session per folder in `~/.ren/session/`) still restores, and moves it into the new folder.
+- Tested in tmux:
+  - Two projects with unsaved tabs, then the tmux session killed (SIGHUP). ren exited, and an edit typed 0.3 s before the kill was in the session, marked interrupted.
+  - A fresh `ren` said which session to restore and listed it on the welcome screen. `1` brought back both projects, in order, with their tabs and unsaved text, and replaced the empty start.
+  - A second ren didn't list the session while the first was still running.
+  - `:qa!` left a clean session, listed without the warning.
+  - `:reload` kept the order and the unsaved text.
+  - `kill -9` 4 s after an edit: the autosaved edit was there.
+  - A `:reload` from the previous build into this one restored both projects and the unsaved text.
+
+### 2026-11-13: Projects
+- **The first spot of the tab bar is a project selector.** It shows the open folder's name as it is (with a folder icon when icons are on, and `▾`), and is never a file tab. Clicking it (or `Ctrl+R`, after VS Code's "Open Recent") opens a list: every open project, the one on screen ticked and `●` on those with unsaved changes, then **Open folder…** as the last item. Open folder… browses from the folder around the current project; "Open as a project" opens the folder as a new project and switches to it. A folder that's already open just comes on screen.
+- **The file tree lost its title row** (the folder's name in capitals): the selector now names the folder, so the tree starts one row higher and shows one more entry. Which panel has focus still shows in the status bar badge and the selection's highlight.
+- **Each project is its own workspace** (`projects.rs`): tabs and cursors, the file tree, language servers and their diagnostics (so the red/yellow names too), the project scan, the jump list, the find bar, the debugger (breakpoints, session, console, launch config), the bottom panel's state, terminals, the git panel and commit form, the `.bin` history, and its `.ren/settings.json`. **Containers are shared**: they belong to the Docker socket, not to a folder (a project whose settings name another socket switches the Containers tab to it, as before).
+- **Switching doesn't stop anything.** The project leaving the screen is parked as it is: its language servers keep running (their messages wait until it's back), its terminals keep reading output in the background, and a debug session stays where it is. The one coming back gets its folder as the working directory, reloads its settings, and reloads tabs whose files changed on disk meanwhile. Unsaved text of the project leaving is copied to its session folder at once (the 3-second autosave only looks after the project on screen), so crash recovery covers every project.
+- How: the editor keeps one project's state in its own fields, as before; the others sit in a `Project` struct with the same fields, and switching swaps them. Nothing else in ren had to learn about projects.
+- `:project` lists them, `:project <n>` switches, `:project <folder>` opens one (an absolute path, or the usual `/x` / `~/x` / relative forms), `:project open` browses, `:project close` closes the one on screen (its servers stop, its terminals and debug session end, as on quit) unless it has unsaved changes.
+- **Quitting checks every project**: `:qa` and `:q` on the last tab bring up a parked project with unsaved changes and stop there (`:qa!` still quits). Language servers of all projects shut down on quit.
+- **`:reload` brings every project back**, in the same order, each with its tabs, tree, panel and unsaved text; the list is kept next to the session of the project on screen.
+- Tested in tmux: opening a second project from the list (keyboard and mouse), a terminal per project (each kept its own shell and output across switches), tabs and focus per project, `:qa` stopping on the other project's unsaved file, `:reload` with two projects (both back, unsaved text kept), `:project close`, opening by path and switching to an already-open folder, and rust-analyzer staying alive with its error while another project was on screen, then shutting down on quit.
+
+### 2026-11-13: Lower tab bar
+- **The dark tab bar is a row and a half instead of two rows.** The padding row above the labels now has only its lower half dark (`▄` in the bar colour over the editor background), so the band is half a row lower while the tabs still stand taller than a single row. The open tab keeps its primary `▁` line right on its label, now over the editor background. Layout and mouse targets are unchanged (the tabs still take two rows of the screen).
+
+### 2026-11-13: Project scan
+- **A second after a folder opens, ren checks the whole project** (`scan.rs`), so red/yellow file names show before anything is opened. Before, a language server only started with the first file of its language, and most only check open files.
+  - **Rust** (`Cargo.toml` at the root): starts rust-analyzer, whose `cargo check` covers every file, again on each save.
+  - **Go** (`go.mod`): starts gopls, which checks every package of the module.
+  - **Python** (`pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`): pyright/basedpyright run in workspace mode (ren answers their `python` / `basedpyright` configuration with `analysis.diagnosticMode: "workspace"`), so they check every file and keep it live as you edit. They're started only when one of them is the project's Python server. When ruff is one of the servers, `ruff check --output-format json --no-cache` runs too, with the severities ruff's server uses (syntax errors, F821, E902, E999 are errors, the rest warnings).
+  - **TypeScript** (`tsconfig.json`): `tsc --noEmit --pretty false --incremental` from `node_modules/.bin` (or `PATH`), with its build info in the temp folder so reruns only recheck what changed. Without the incremental flags when the project refuses them.
+  - A server that isn't installed stays quiet here; opening a file of that language still says so.
+- **Cost.** ren itself doesn't slow down: servers and checkers are separate programs, and ren only reads their output on its 20 ms loop. The machine pays: rust-analyzer's first index and `cargo check`, pyright reading every file, and `tsc` on a big project can take seconds and a lot of memory. So:
+  - The command-line checkers (ruff, tsc) run in the background, one at a time, under `nice -n 10`.
+  - They run again only after a save of a file of their language, or of `pyproject.toml`, `ruff.toml`, `setup.cfg`, `package.json`, `tsconfig*.json`, half a second after the saves stop. A rerun also waits at least as long as the last run took, so a checker never gets more than half the time.
+  - They don't run on a typing pause: they read the files on disk, so they'd see nothing new, and the open file's problems already come live from its server.
+- **Whose view counts.** An open file with a live server shows the server's diagnostics (they follow unsaved edits). The checkers' results count for files no server is watching. A checker that fails keeps its last results.
+- `:scan` checks again now (and asks rust-analyzer for a new `cargo check`), e.g. after a `git pull`. `"scan": false` (globally or in a project's `.ren/settings.json`) turns it all off; for pyright it applies on `:lsp restart`. The running checker shows in the status bar (`tsc…`).
+- Tested in tmux, with no file open: a Cargo crate (error in a nested module, warning in another), a Go module, a Python project with basedpyright and then with ruff alone (fixing a file and saving recoloured it after the tab closed, though ruff's server had cleared it), and a TypeScript project with `tsc` 7 (a fix plus save cleared the red).
+
+### 2026-11-12: Red and yellow file names for problems
+- **A file with errors shows its name in red, one with only warnings in yellow** (errors win when it has both), like VS Code. Both the tab title and the file tree name take the colour; the icon keeps its own.
+- **Folders in the tree take the worst colour of everything inside them**, so a collapsed folder still shows that something in it is broken.
+- The colours come from every diagnostic ren holds, including the ones rust-analyzer's `cargo check` reports for files that aren't open. Info and hint diagnostics don't count. Colours are the ones the bar and gutter already use for errors and warnings.
+- **Closing a tab no longer drops that file's diagnostics.** rust-analyzer's `cargo check` results still hold for a closed file, and the tree should keep showing them. Servers that only check open files (pyright, the TypeScript server) clear theirs on didClose. ren's own "not in any crate" warning goes on close, since it's only rechecked for open files. `:lsp stop` / `:lsp restart` and a server exiting now clear that server's diagnostics for every file, not just the open ones.
+- **A file opened from the command line through a symlink gets its real path,** like the tree's root (the working directory) already did. On macOS `ren /tmp/x/a.rs` gave the buffer `/tmp/x/a.rs` while the tree had `/private/tmp/x/a.rs`: two different files to ren, so the colours didn't match, and rust-analyzer was handed the same project twice.
+
+### 2026-11-12: Comment markers per file type
+- **Ctrl+/ uses each file type's own comment syntax** (`comments.rs`). The highlighter only knows ten languages, so Ctrl+/ did nothing in CSS, HTML, SQL, Dockerfiles… and YAML got the TOML/INI pair (`#` and `;`). A table by file name and extension now covers far more types; anything it doesn't list falls back to the highlighter's language.
+  - `//` (with `/* */`): Rust, C/C++, Objective-C, JS/TS, Go, Java, Kotlin, Swift, C#, Scala, Dart, Groovy/Gradle, Protobuf, JSONC/JSON5, SCSS/Less, Solidity, shaders, D, Haxe. Zig/Odin `//` only. PHP `//` and `#`. F# `//` with `(* *)`. Terraform/HCL `#` and `//`.
+  - `#`: Python, shell, Ruby, Perl, R, Nix, Elixir, YAML, TOML, conf/cfg, properties, CMake, Make, Crystal, CoffeeScript, Nim, GraphQL, Tcl, PowerShell, Julia, awk/sed, systemd units, `.env*`. By name: `Dockerfile`, `Containerfile`, `Makefile`, `CMakeLists.txt`, `Gemfile`, `Rakefile`, `Justfile`, `Procfile`, `Vagrantfile`, `Brewfile`, `Pipfile`, `.gitignore`, `.gitattributes`, `.dockerignore`, `.npmrc`, shell rc files.
+  - `--`: SQL (with `/* */`), Lua (with `--[[ ]]`), Haskell/Elm/PureScript (with `{- -}`), Ada, VHDL.
+  - `;`: INI/reg (and `#`), Lisp, Clojure, Emacs Lisp, Scheme, Racket, assembly. `%`: TeX/BibTeX, Erlang. `"`: Vim script. `'`: VB. `REM` / `::`: batch.
+  - **Block only**, one block around the line or the selected lines: `/* … */` in CSS; `<!-- … -->` in HTML, XML, SVG, XAML, plist, Markdown, Vue/Svelte/Astro, MSBuild projects and templates (JSP, ERB, Handlebars, Nunjucks). Ctrl+/ again removes the block when the lines start with the open marker and end with the close one.
+  - JSON has no comments and says so.
+- Limit: Vue/Svelte/Astro files get `<!-- -->` everywhere, also inside `<script>`/`<style>`, where VS Code would switch to `//` or `/* */`. Noted in TODO.md.
+
+### 2026-11-12: Ctrl+/ comments and uncomments lines
+- **Ctrl+/** toggles a line comment on the cursor's line, or on every selected line. A selection ending at column 0 doesn't take that last line.
+  - Only the marker at the start of the line, after its indent, counts: `// hello world // hello world` becomes `hello world // hello world`, and Ctrl+/ again puts it back.
+  - When every non-blank line is commented, the markers come off, with one space after them. Otherwise each line gets `// ` (or `# `, `-- `: the file type's first marker) at the block's smallest indent, so the markers line up.
+  - Blank lines are left alone. The cursor and selection stay on the same text. One Ctrl+Z undoes it.
+  - Uncommenting knows every marker of the file type (e.g. `#` and `;`). Plain text and JSON have none and say so.
+- Without kitty keys, terminals send Ctrl+/ as byte 0x1F, which crossterm reports as Ctrl+7 (Ctrl+_ on some). All three are taken. Tested in tmux with Rust (`//`) and Python (`#`).
+
+### 2026-11-12: Rest the mouse on code: problems, info and quick fixes
+- **Resting the mouse on code for a second opens a box** (`peek.rs`, drawn by `draw_peek`), top to bottom:
+  - **Each problem at that spot,** worst first: `✖ error` / `▲ warning` / `ℹ info` in its colour, who found it with the rule code (`rustc E0308`, `Ruff F401`, `basedpyright reportUnusedImport`), the server's full message (every line, wrapped, not just the first line the bar shows), and the rule's docs link (`→ https://…`) when the server sends one.
+  - **The server's hover** (type, signature, docs).
+  - **Quick fixes** (`⚡ Import std::collections::HashMap`, `⚡ Qualify as …`). They highlight under the mouse and a click applies one. `Looking for quick fixes…` shows until the servers answer. ren's own fix (`Insert mod x;`) is listed on its warning.
+- **When it shows:**
+  - Only over actual text; not past the end of a line, and not while a menu, the completion list or the F1 box is open, or in Command mode.
+  - With no problem at the spot it shows just the hover, and nothing when the server has nothing to say.
+  - It sits below the line, or above when there's no room.
+  - It stays open while the mouse is on the problem's span (or the word) or inside the box. It closes when the mouse leaves both, on a click outside, a scroll, any key, a text change or another tab.
+- **Requests:** `textDocument/hover` at the spot, and `textDocument/codeAction` with `only: ["quickfix"]` and the problems' diagnostics to every server of the language that can, merged with duplicates dropped, at most 8 fixes (Ctrl+. still lists every action). Each box gets a number, so late answers for a closed box are ignored. Errors stay silent.
+- Hover text from any server: markdown rules (`---`) now become a blank line instead of showing as dashes, in the F1 box too.
+- Note: undeclared names (`HashMap` without its `use`) are reported by `cargo check` on save, not live by rust-analyzer. Their Import / Qualify fixes show in the box after a save.
+- Testing note: tmux treats a trailing `;` in `send-keys` as a command separator, which looked like ren dropping `;` after `()`. It wasn't.
+
+### 2026-11-12: Auto-import across modules works
+- **Fixed: accepting a completion for something from another module didn't add its `use` line.** rust-analyzer offers items that aren't in scope yet (e.g. `deep_fn` from `utils::deep`), but works out their import only on `completionItem/resolve`. ren inserted the text first and resolved after, so the change reached the server first. rust-analyzer then redid the resolve against the changed text, didn't find the item and returned it without `additionalTextEdits` (seen in the LSP log).
+  - Now ren resolves first, waiting up to 500 ms (`RESOLVE_TIMEOUT`) while the text is unchanged. Then it applies the completion and the import together. Accepting `deep_fn` gives `use crate::utils::deep::deep_fn;` at the top, and the cursor ends after `deep_fn()`.
+  - A late answer is still applied when it arrives, as before.
+- **The popup shows where an item comes from:** the server's `labelDetails.detail` is drawn dim after the name, e.g. `deep_fn() (use crate::utils::deep::deep_fn)`, like VS Code.
+- Checked as well: the `Ctrl+.` quick fixes for an unresolved name (`⚡ Import crate::utils::deep::DeepThing`, `⚡ Qualify as utils::deep::DeepThing`) work. The import merges into an existing `use` (`use crate::utils::deep::{DeepThing, deep_fn};`).
+- Still Rust's rules: only items the module can see are offered (`pub` items in `pub mod`s), and only from files that are in the crate (see the entry below).
+
+### 2026-11-12: Rust files outside the module tree, several projects per server
+- **Why completion only worked in some files:** rust-analyzer only analyses files reached from a crate root (`main.rs`, `lib.rs`, …) through `mod name;` lines. A file nobody declares gets no completion, inlay hints or errors. This is typical of new files made with `:touch`. VS Code behaves the same but warns; rust-analyzer didn't send ren any warning (no diagnostic for the file), so it looked broken. Files that are declared worked in every module (checked: `utils/mod.rs` opened first or second, and module files in ren's own source).
+- **ren now checks** with rust-analyzer's `experimental/parentModule`: null means no crate contains the file.
+  - When it is asked: for the open Rust file, once the server has been idle for 1.5 s and typing has paused, and again whenever any Rust file changes.
+  - Crate roots are never flagged: `main.rs`, `lib.rs`, `build.rs`, `src/bin`, `examples`, `tests`, `benches`. Loading a project comes in steps with short gaps, which once gave a false warning for a `lib.rs`.
+  - A file outside the tree gets a warning on line 1 (gutter, ▲ count, `:diag`, the bar), e.g. `Not in the crate: add mod orphan; to src/main.rs (Ctrl+. or :mod)`.
+- **Fix it in one step:** `Ctrl+.` lists `⚡ Insert mod orphan; in src/main.rs` (per possible parent: `lib.rs`/`main.rs` next to it, `x.rs` or `x/mod.rs` for a folder). `:mod [parent]` does the same.
+  - The line goes after the last top-level `mod x;`, or at the top below `//!` docs and `#![…]`.
+  - The parent opens in a background tab, edited but not saved. The warning clears as soon as rust-analyzer sees the line.
+  - rust-analyzer offers its own "Insert `mod`" fixes too, but only with the cursor on line 1.
+- **Several projects, one server:** ren ran one server per language, rooted at the first file's project, so files from a second Cargo project got nothing. Now opening a file outside the running server's folders sends `workspace/didChangeWorkspaceFolders` to add that project, and the bottom bar says so. `workspace/workspaceFolders` answers with all of them.
+
 ### 2026-11-12: Tab completion on the `:` line
 - **Fixed: Tab looked dead in `:touch`, `:mkfile`, `:mkdir` (and every path command).** Two causes:
   - With several matches, the list went into a bar message. Since the `:` line moved into the bottom bar, messages aren't shown while typing a command, so nothing seemed to happen.

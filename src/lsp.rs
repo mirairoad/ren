@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Enc {
@@ -105,7 +106,7 @@ pub fn candidates(lang: &str) -> &'static [&'static [&'static str]] {
     }
 }
 
-fn root_markers(lang: &str) -> &'static [&'static str] {
+pub(crate) fn root_markers(lang: &str) -> &'static [&'static str] {
     match lang {
         "Rust" => &["Cargo.toml"],
         "JS/TS" => &["package.json", "tsconfig.json", "jsconfig.json"],
@@ -130,6 +131,46 @@ pub fn find_root(lang: &str, file: &Path, fallback: &Path) -> PathBuf {
         dir = d.parent();
     }
     git.unwrap_or_else(|| fallback.to_path_buf())
+}
+
+/// The servers `start` would run for a language: (executable, command line)
+/// for each one found, and the names of those that weren't. The configured
+/// list when there is one, else the first candidate found.
+pub fn resolve(
+    lang: &str,
+    roots: &[&Path],
+    configured: Option<&Vec<Vec<String>>>,
+) -> (Vec<(PathBuf, Vec<String>)>, Vec<String>) {
+    let mut specs: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut missing = Vec::new();
+    match configured.filter(|c| !c.is_empty()) {
+        Some(list) => {
+            for spec in list {
+                match find_exe(&spec[0], roots) {
+                    Some(exe) => specs.push((exe, spec.clone())),
+                    None => missing.push(spec[0].clone()),
+                }
+            }
+        }
+        None => {
+            let cands = candidates(lang);
+            if let Some((exe, spec)) = cands.iter().find_map(|c| find_exe(c[0], roots).map(|p| (p, *c))) {
+                specs.push((exe, spec.iter().map(|x| x.to_string()).collect()));
+            } else {
+                missing = cands.iter().map(|c| c[0].to_string()).collect();
+            }
+        }
+    }
+    (specs, missing)
+}
+
+/// A workspace folder for LSP: `{ uri, name }`.
+fn folder_json(root: &Path) -> Value {
+    let name = root
+        .file_name()
+        .map(|x| x.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    json!({ "uri": path_to_uri(root), "name": name })
 }
 
 pub fn language_id(lang: &str, path: &Path) -> &'static str {
@@ -200,6 +241,12 @@ pub enum Pending {
     Execute,
     /// Inlay hints for the file at `rev`.
     InlayHints(PathBuf, u64),
+    /// rust-analyzer's parent module of a file, asked to tell whether it is part
+    /// of a crate at all.
+    ParentModule(PathBuf),
+    /// Hover and quick fixes for the mouse-rest box number `seq`.
+    PeekHover(u64),
+    PeekActions(u64),
 }
 
 pub struct Diag {
@@ -282,7 +329,11 @@ pub struct Server {
     pub enc: Enc,
     queue: Vec<Value>,
     pub root: PathBuf,
+    /// Folders of other projects added later (`workspace/didChangeWorkspaceFolders`).
+    pub extra_roots: Vec<PathBuf>,
     pub progress: HashMap<String, (String, String)>,
+    /// When the server last became idle (ready, or its work list emptied).
+    pub idle_since: Instant,
     pub dead: bool,
 }
 
@@ -322,6 +373,8 @@ pub struct Lsp {
     /// Languages whose servers couldn't start (cleared by `:lsp restart`).
     pub failed: HashSet<&'static str>,
     pub diags: HashMap<String, Vec<Diag>>,
+    /// The project scan is on: pyright/basedpyright check every file.
+    pub scan: bool,
     ids: HashMap<String, &'static str>,
     next_order: usize,
     tx: Sender<Raw>,
@@ -460,6 +513,7 @@ impl Lsp {
             servers: HashMap::new(),
             failed: HashSet::new(),
             diags: HashMap::new(),
+            scan: true,
             ids: HashMap::new(),
             next_order: 0,
             tx,
@@ -519,9 +573,15 @@ impl Lsp {
         }
     }
 
+    /// Stops the language's servers and forgets their diagnostics, also the
+    /// ones for files that aren't open.
     pub fn stop_lang(&mut self, lang: &str) {
-        for id in self.ids(lang) {
+        let ids = self.ids(lang);
+        for id in &ids {
             self.stop(id);
+        }
+        for ds in self.diags.values_mut() {
+            ds.retain(|d| !ids.contains(&d.server));
         }
     }
 
@@ -538,6 +598,49 @@ impl Lsp {
             let c = &s.caps[name];
             !c.is_null() && c != &Value::Bool(false)
         })
+    }
+
+    /// True when the server has had no background work (indexing…) for a
+    /// moment. Loading a project comes in several steps with short gaps.
+    pub fn idle(&self, id: &str) -> bool {
+        self.servers
+            .get(id)
+            .is_some_and(|s| s.progress.is_empty() && s.idle_since.elapsed() >= Duration::from_millis(1500))
+    }
+
+    /// A ready server of `lang` that offers rust-analyzer's experimental `name` request.
+    pub fn pick_experimental(&self, lang: &str, name: &str) -> Option<&'static str> {
+        self.ids(lang)
+            .into_iter()
+            .find(|id| self.ready(id) && self.servers[*id].caps["experimental"][name] == Value::Bool(true))
+    }
+
+    /// Makes the servers of `lang` cover `file`'s project too, when it lies outside
+    /// the folders they were started with (one server serves every project).
+    /// Returns the folder added, if any.
+    pub fn add_root(&mut self, lang: &str, file: &Path, cwd: &Path) -> Option<PathBuf> {
+        let root = find_root(lang, file, cwd);
+        let mut added = false;
+        for id in self.ids(lang) {
+            let Some(s) = self.servers.get_mut(id) else { continue };
+            if std::iter::once(&s.root)
+                .chain(&s.extra_roots)
+                .any(|r| root.starts_with(r))
+            {
+                continue;
+            }
+            // Before the server is up its capabilities are unknown: send anyway
+            // (queued); servers that can't take it ignore the notification.
+            let wf = &s.caps["workspace"]["workspaceFolders"];
+            if s.ready && !(wf["supported"] == Value::Bool(true) && !wf["changeNotifications"].is_null()) {
+                continue;
+            }
+            s.extra_roots.push(root.clone());
+            let params = json!({ "event": { "added": [folder_json(&root)], "removed": [] } });
+            self.notify(id, "workspace/didChangeWorkspaceFolders", params);
+            added = true;
+        }
+        added.then_some(root)
     }
 
     pub fn trigger_chars(&self, lang: &str, provider: &str) -> Vec<char> {
@@ -570,27 +673,7 @@ impl Lsp {
             return Err(String::new());
         }
         let root = find_root(lang, file, cwd);
-        let roots = [root.as_path(), cwd];
-        let mut specs: Vec<(PathBuf, Vec<String>)> = Vec::new();
-        let mut missing = Vec::new();
-        match configured.filter(|c| !c.is_empty()) {
-            Some(list) => {
-                for spec in list {
-                    match find_exe(&spec[0], &roots) {
-                        Some(exe) => specs.push((exe, spec.clone())),
-                        None => missing.push(spec[0].clone()),
-                    }
-                }
-            }
-            None => {
-                let cands = candidates(lang);
-                if let Some((exe, spec)) = cands.iter().find_map(|c| find_exe(c[0], &roots).map(|p| (p, *c))) {
-                    specs.push((exe, spec.iter().map(|x| x.to_string()).collect()));
-                } else {
-                    missing = cands.iter().map(|c| c[0].to_string()).collect();
-                }
-            }
-        }
+        let (specs, missing) = resolve(lang, &[root.as_path(), cwd], configured);
         let mut names = Vec::new();
         let mut errs = Vec::new();
         for (exe, spec) in specs {
@@ -656,7 +739,9 @@ impl Lsp {
             enc: Enc::Utf16,
             queue: Vec::new(),
             root: root.to_path_buf(),
+            extra_roots: Vec::new(),
             progress: HashMap::new(),
+            idle_since: Instant::now(),
             dead: false,
         };
         let root_name = root
@@ -776,6 +861,7 @@ impl Lsp {
                         });
                     }
                     "workspace/configuration" => {
+                        let scan = self.scan;
                         let res: Vec<Value> = v["params"]["items"]
                             .as_array()
                             .map(|items| {
@@ -785,6 +871,14 @@ impl Lsp {
                                         Some("rust-analyzer") => init_options("Rust"),
                                         Some("gopls") => init_options("Go"),
                                         Some("Lua") => json!({ "hint": { "enable": true } }),
+                                        // pyright/basedpyright: check every file, not only
+                                        // the open ones (the project scan).
+                                        Some("python" | "basedpyright") if scan => {
+                                            json!({ "analysis": { "diagnosticMode": "workspace" } })
+                                        }
+                                        Some("python.analysis" | "basedpyright.analysis") if scan => {
+                                            json!({ "diagnosticMode": "workspace" })
+                                        }
                                         _ => Value::Null,
                                     })
                                     .collect()
@@ -794,12 +888,11 @@ impl Lsp {
                         s.write(&json!({ "jsonrpc": "2.0", "id": id, "result": res }));
                     }
                     "workspace/workspaceFolders" => {
-                        let root = s.root.clone();
-                        let name = root
-                            .file_name()
-                            .map(|x| x.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        s.write(&json!({ "jsonrpc": "2.0", "id": id, "result": [{ "uri": path_to_uri(&root), "name": name }] }));
+                        let folders: Vec<Value> = std::iter::once(&s.root)
+                            .chain(&s.extra_roots)
+                            .map(|r| folder_json(r))
+                            .collect();
+                        s.write(&json!({ "jsonrpc": "2.0", "id": id, "result": folders }));
                     }
                     "workspace/inlayHint/refresh" => {
                         s.write(&json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null }));
@@ -835,6 +928,7 @@ impl Lsp {
                         }
                         _ => {
                             s.progress.remove(&token);
+                            s.idle_since = Instant::now();
                             // Work done (e.g. indexing): earlier answers may have been
                             // partial, so inlay hints get asked for again, as on a refresh.
                             if s.progress.is_empty() {
@@ -866,6 +960,7 @@ impl Lsp {
                         _ => Enc::Utf16,
                     };
                     s.ready = true;
+                    s.idle_since = Instant::now();
                     s.write(&json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
                     let settings = server_settings(s.lang);
                     if !settings.is_null() {

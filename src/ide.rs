@@ -12,6 +12,9 @@ pub const MENU_ROWS: usize = 14;
 
 pub struct CItem {
     pub label: String,
+    /// Shown dim right after the label (LSP `labelDetails.detail`), e.g.
+    /// rust-analyzer's `(use crate::utils::deep::deep_fn)` for an auto-import.
+    pub suffix: String,
     pub kind: u64,
     pub detail: String,
     filter: String,
@@ -44,6 +47,8 @@ pub enum MenuAction {
     Run(String),
     Dir(PathBuf),
     OpenDir(PathBuf),
+    /// Opens the folder as a project of its own (the project selector).
+    OpenProject(PathBuf),
 }
 
 pub struct Menu {
@@ -113,6 +118,79 @@ fn markup_text(v: &Value) -> String {
         _ => String::new(),
     }
 }
+
+/// `Diag::server` of ren's own "not in the crate" warning.
+pub(super) const UNLINKED: &str = "ren";
+
+/// A Rust file's module name and the existing files that could declare it with
+/// `mod name;`. None when it isn't inside a Cargo crate.
+fn module_parents(path: &Path) -> Option<(String, Vec<PathBuf>)> {
+    let crate_dir = path.ancestors().skip(1).find(|d| d.join("Cargo.toml").exists())?;
+    let src = crate_dir.join("src");
+    let (name, dir) = if path.file_name()? == "mod.rs" {
+        let d = path.parent()?;
+        (d.file_name()?.to_string_lossy().into_owned(), d.parent()?)
+    } else {
+        (path.file_stem()?.to_string_lossy().into_owned(), path.parent()?)
+    };
+    let cands = if dir == src {
+        vec![src.join("lib.rs"), src.join("main.rs")]
+    } else {
+        vec![dir.with_extension("rs"), dir.join("mod.rs")]
+    };
+    Some((name, cands.into_iter().filter(|p| p.exists() && p != path).collect()))
+}
+
+/// Files Cargo builds as crates by themselves: never "not in the crate".
+fn is_crate_root(path: &Path) -> bool {
+    let Some(crate_dir) = path.ancestors().skip(1).find(|d| d.join("Cargo.toml").exists()) else {
+        return false;
+    };
+    let Ok(rel) = path.strip_prefix(crate_dir) else {
+        return false;
+    };
+    let parts: Vec<String> = rel.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    matches!(
+        parts.as_slice(),
+        ["build.rs"]
+            | ["src", "main.rs"]
+            | ["src", "lib.rs"]
+            | ["src", "bin", ..]
+            | ["examples" | "tests" | "benches", ..]
+    )
+}
+
+fn is_rust_ident(s: &str) -> bool {
+    let mut cs = s.chars();
+    cs.next().is_some_and(|c| c.is_alphabetic() || c == '_') && cs.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Where a new `mod x;` goes: after the last top-level `mod` declaration, or
+/// else at the top, after inner attributes and `//!` docs. True = add a blank
+/// line after it (nothing to group with).
+fn mod_insert_line(lines: &[Vec<char>]) -> (usize, bool) {
+    let is_decl = |l: &Vec<char>| {
+        let t: String = l.iter().collect();
+        let t = t.trim_end();
+        let rest = t.strip_prefix("pub(crate) ").or(t.strip_prefix("pub ")).unwrap_or(t);
+        rest.starts_with("mod ") && rest.ends_with(';')
+    };
+    if let Some(last) = lines.iter().rposition(is_decl) {
+        return (last + 1, false);
+    }
+    let top = lines
+        .iter()
+        .take_while(|l| {
+            let t: String = l.iter().collect();
+            t.starts_with("//!") || t.starts_with("#![")
+        })
+        .count();
+    (top, true)
+}
+
+/// How long accepting a completion waits for its auto-import edits.
+const RESOLVE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How long typing must pause before inlay hints are asked for again.
 const HINT_DELAY: Duration = Duration::from_millis(250);
@@ -188,6 +266,29 @@ fn hint_kind(lsp_kind: Option<u64>, label: &str, line: &[char], x: usize) -> &'s
     }
 }
 
+/// A hover answer as plain lines: code fences dropped, blank runs squeezed.
+pub(super) fn hover_lines(r: &Value) -> Vec<String> {
+    let text = markup_text(&r["contents"]);
+    let mut lines: Vec<String> = Vec::new();
+    for l in text.lines() {
+        let l = l.trim_end();
+        if l.starts_with("```") {
+            continue;
+        }
+        // A markdown rule (`---`) separates sections: a blank line does that here.
+        let rule = l.len() >= 3 && (l.chars().all(|c| c == '-') || l.chars().all(|c| c == '*'));
+        let l = if rule { "" } else { l };
+        if l.is_empty() && lines.last().is_none_or(|x| x.is_empty()) {
+            continue;
+        }
+        lines.push(l.replace("&nbsp;", " "));
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
 fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -214,7 +315,7 @@ impl Editor {
         v
     }
 
-    fn lsp_config(&self, lang: &str) -> Option<Vec<Vec<String>>> {
+    pub(super) fn lsp_config(&self, lang: &str) -> Option<Vec<Vec<String>>> {
         Self::lang_keys(lang)
             .iter()
             .find_map(|k| self.settings.lsp_servers.get(k))
@@ -260,7 +361,13 @@ impl Editor {
         if self.bufs[i].lsp_open {
             return;
         }
-        if !self.lsp.alive_lang(lang) {
+        if self.lsp.alive_lang(lang) {
+            // A file from another project: the running server takes its folder too.
+            let path = self.bufs[i].path.clone().unwrap();
+            if let Some(root) = self.lsp.add_root(lang, &path, &self.tree.root) {
+                self.info(format!("Language server: added project {}", root.display()));
+            }
+        } else {
             if self.lsp.failed.contains(lang) {
                 return;
             }
@@ -313,7 +420,13 @@ impl Editor {
             "textDocument/didClose",
             json!({ "textDocument": { "uri": path_to_uri(&path) } }),
         );
-        self.lsp.diags.remove(&path_key(&path));
+        // The servers' diagnostics stay: rust-analyzer's `cargo check` results
+        // still hold for a closed file (the tree shows them), and servers that
+        // only check open files clear theirs on didClose. ren's own crate
+        // warning goes, since it's only rechecked for open files.
+        if let Some(ds) = self.lsp.diags.get_mut(&path_key(&path)) {
+            ds.retain(|d| d.server != UNLINKED);
+        }
         self.bufs[i].lsp_open = false;
     }
 
@@ -338,6 +451,9 @@ impl Editor {
             self.lsp_sync(i);
         }
         let mut changed = self.inlay_tick();
+        changed |= self.peek_tick();
+        changed |= self.scan_tick();
+        self.crate_tick();
         let events = self.lsp.poll();
         changed |= !events.is_empty();
         for ev in events {
@@ -391,6 +507,192 @@ impl Editor {
         b.hint_rev = Some(rev);
         b.hint_req = req.map(|r| (id, r));
         false
+    }
+
+    /// Identifies what decides whether a Rust file is in a crate: every open
+    /// file of the language and its edits, and the server's finished work.
+    fn crate_key(&self, lang: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.lsp_idle_gen.hash(&mut h);
+        for b in self.bufs.iter().filter(|b| b.lang.name == lang) {
+            (&b.path, b.rev).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Rust: asks rust-analyzer whether the open file belongs to a crate. A file
+    /// no `mod` reaches gets no completion, hints or errors, and the server
+    /// doesn't say so, so ren warns (`on_parent_module`). Asked once the server
+    /// is idle and typing has paused, again whenever a Rust file changes.
+    fn crate_tick(&mut self) {
+        let i = self.cur;
+        let Some(lang) = self.lsp_lang(i).filter(|l| *l == "Rust") else {
+            return;
+        };
+        if self.bufs[i].path.as_deref().is_some_and(is_crate_root) {
+            return;
+        }
+        let Some(id) = self.lsp.pick_experimental(lang, "parentModule") else {
+            return;
+        };
+        if !self.lsp.idle(id) {
+            return;
+        }
+        let key = self.crate_key(lang);
+        let b = &self.bufs[i];
+        if !b.lsp_open || b.crate_key == Some(key) || b.edited_at.elapsed() < Duration::from_millis(400) {
+            return;
+        }
+        if b.crate_req.is_some_and(|(sid, r)| self.lsp.is_pending(sid, r)) {
+            return;
+        }
+        let path = b.path.clone().unwrap();
+        let p = json!({
+            "textDocument": { "uri": path_to_uri(&path) },
+            "position": { "line": 0, "character": 0 }
+        });
+        let req = self
+            .lsp
+            .request(id, "experimental/parentModule", p, Pending::ParentModule(path));
+        let b = &mut self.bufs[i];
+        b.crate_key = Some(key);
+        b.crate_req = req.map(|r| (id, r));
+    }
+
+    /// rust-analyzer answers null when the file is in no crate (a crate root
+    /// gets its Cargo.toml, a module its `mod` line).
+    fn on_parent_module(&mut self, path: &Path, r: Value) {
+        let unlinked = r.is_null() || r.as_array().is_some_and(|a| a.is_empty());
+        let key = path_key(path);
+        let Some(i) = self
+            .bufs
+            .iter()
+            .position(|b| b.path.as_deref().is_some_and(|p| path_key(p) == key))
+        else {
+            return;
+        };
+        let was = self.bufs[i].unlinked;
+        self.bufs[i].unlinked = unlinked;
+        // Linked after all (e.g. `mod` just added): drop the warning from the bar too.
+        if was && !unlinked && self.msg.as_ref().is_some_and(|m| m.0 == self.unlinked_msg(path)) {
+            self.msg = None;
+        }
+        let msg = unlinked.then(|| self.unlinked_msg(path));
+        let ds = self.lsp.diags.entry(key).or_default();
+        ds.retain(|d| d.server != UNLINKED);
+        if let Some(msg) = msg {
+            ds.push(Diag {
+                server: UNLINKED,
+                l0: 0,
+                c0: 0,
+                l1: 0,
+                c1: 0,
+                sev: 2,
+                msg: msg.clone(),
+                raw: Value::Null,
+                enc: Enc::Utf32,
+            });
+            if !was && i == self.cur {
+                self.error(msg);
+            }
+        }
+    }
+
+    fn unlinked_msg(&self, path: &Path) -> String {
+        match module_parents(path) {
+            Some((name, parents)) if !parents.is_empty() => format!(
+                "Not in the crate: add `mod {};` to {} (Ctrl+. or :mod). rust-analyzer ignores this file until then",
+                name,
+                self.rel(&parents[0])
+            ),
+            Some((name, _)) => format!(
+                "Not in the crate: declare it with `mod {};` in its parent module. rust-analyzer ignores this file until then",
+                name
+            ),
+            None => "Not in any Cargo crate: rust-analyzer ignores this file".into(),
+        }
+    }
+
+    /// Fixes ren offers itself in the code-action menu.
+    pub(super) fn local_actions(&self) -> Vec<(String, MenuAction)> {
+        let b = self.buf();
+        let Some(path) = b.path.as_deref().filter(|_| b.unlinked) else {
+            return Vec::new();
+        };
+        let Some((name, parents)) = module_parents(path) else {
+            return Vec::new();
+        };
+        parents
+            .iter()
+            .map(|p| {
+                let arg = match p.strip_prefix(&self.tree.root) {
+                    Ok(r) => format!(" \"/{}\"", r.display()),
+                    Err(_) => String::new(),
+                };
+                (
+                    format!("⚡ Insert `mod {};` in {}", name, self.rel(p)),
+                    MenuAction::Run(format!("mod{}", arg)),
+                )
+            })
+            .collect()
+    }
+
+    /// `:mod [parent]`: declares the open Rust file in its parent module with
+    /// `mod name;` so rust-analyzer takes it in. The parent is edited in a tab of
+    /// its own, not saved.
+    pub(crate) fn link_module(&mut self, parent: Option<&str>) {
+        let Some(path) = self.buf().path.clone().filter(|_| self.buf().lang.name == "Rust") else {
+            return self.error("Not a Rust file");
+        };
+        let Some((name, parents)) = module_parents(&path) else {
+            return self.error("Not inside a Cargo crate (no Cargo.toml above it)");
+        };
+        if !is_rust_ident(&name) {
+            return self.error(format!(
+                "\"{}\" can't be a module name: rename the file (letters, digits and _)",
+                name
+            ));
+        }
+        let target = match parent {
+            Some(p) => self.resolve_path(p),
+            None => match parents.first() {
+                Some(p) => p.clone(),
+                None => return self.error("No parent module file to declare it in (src/x.rs or src/x/mod.rs)"),
+            },
+        };
+        let Some(i) = self.buf_index_for(&target) else {
+            return self.error(format!("Can't open {}", self.rel(&target)));
+        };
+        let decl = format!("mod {};", name);
+        let b = &mut self.bufs[i];
+        let declared = b.lines.iter().any(|l| {
+            let t: String = l.iter().collect();
+            let t = t.trim();
+            t == decl || (t.starts_with("pub") && t.ends_with(&format!(" {}", decl)))
+        });
+        if declared {
+            let rel = self.rel(&target);
+            return self.info(format!("{} already has `{}`", rel, decl));
+        }
+        let (at, gap) = mod_insert_line(&b.lines);
+        b.checkpoint();
+        if at < b.lines.len() {
+            let mut text: Vec<char> = decl.chars().collect();
+            text.push('\n');
+            if gap && !b.lines[at].iter().all(|c| c.is_whitespace()) {
+                text.push('\n');
+            }
+            b.insert_text((0, at), &text);
+        } else {
+            let y = b.last();
+            let x = b.line_len(y);
+            let mut text = vec!['\n'];
+            text.extend(decl.chars());
+            b.insert_text((x, y), &text);
+        }
+        let rel = self.rel(&target);
+        self.info(format!("Added `{}` to {} (not saved yet)", decl, rel));
     }
 
     fn on_inlay_hints(&mut self, lang: &'static str, path: &Path, rev: u64, r: Value) {
@@ -468,23 +770,21 @@ impl Editor {
             LspEvent::Exited { lang, id, name } => {
                 let others = self.lsp.alive_lang(lang);
                 for b in self.bufs.iter_mut() {
-                    if b.lang.name == lang {
-                        if !others {
-                            b.lsp_open = false;
-                        }
-                        if let Some(p) = &b.path {
-                            if let Some(ds) = self.lsp.diags.get_mut(&path_key(p)) {
-                                ds.retain(|d| d.server != id);
-                            }
-                        }
+                    if b.lang.name == lang && !others {
+                        b.lsp_open = false;
                     }
+                }
+                for ds in self.lsp.diags.values_mut() {
+                    ds.retain(|d| d.server != id);
                 }
                 self.error(format!("{} exited (restart with :lsp restart)", name));
             }
             LspEvent::Notification { lang, method, params } => match method.as_str() {
                 "textDocument/publishDiagnostics" => self.on_diagnostics(lang, &params),
                 // The server's hints changed (e.g. it finished indexing): ask again.
+                // Also sent by ren itself when a server goes idle.
                 "workspace/inlayHint/refresh" => {
+                    self.lsp_idle_gen += 1;
                     for b in self.bufs.iter_mut() {
                         b.hint_rev = None;
                     }
@@ -519,9 +819,18 @@ impl Editor {
                 if let Some(e) = error {
                     if !matches!(
                         kind,
-                        Pending::Completion | Pending::Signature | Pending::Hover | Pending::InlayHints(..)
+                        Pending::Completion
+                            | Pending::Signature
+                            | Pending::Hover
+                            | Pending::InlayHints(..)
+                            | Pending::ParentModule(..)
+                            | Pending::PeekHover(..)
+                            | Pending::PeekActions(..)
                     ) {
                         self.error(format!("LSP: {}", e));
+                    }
+                    if let Pending::PeekHover(seq) | Pending::PeekActions(seq) = kind {
+                        self.peek_answered(seq);
                     }
                     if matches!(kind, Pending::Completion) && Some(id) == self.comp_id {
                         self.comp_id = None;
@@ -554,6 +863,9 @@ impl Editor {
                         }
                     }
                     Pending::InlayHints(path, rev) => self.on_inlay_hints(lang, &path, rev, result),
+                    Pending::ParentModule(path) => self.on_parent_module(&path, result),
+                    Pending::PeekHover(seq) => self.on_peek_hover(seq, result),
+                    Pending::PeekActions(seq) => self.on_peek_actions(lang, seq, result),
                     Pending::Execute | Pending::Init => {}
                 }
             }
@@ -598,6 +910,14 @@ impl Editor {
     pub fn buf_diags(&self, i: usize) -> Option<&Vec<Diag>> {
         let p = self.bufs.get(i)?.path.as_ref()?;
         self.lsp.diags.get(&path_key(p)).filter(|d| !d.is_empty())
+    }
+
+    /// Files and folders with problems, by `path_key`: 1 when there's an error,
+    /// 2 when only warnings. Folders take the worst of what's inside them, so a
+    /// collapsed folder still shows that something in it is broken.
+    /// Includes what the project scan found in files no server watches.
+    pub(crate) fn problem_marks(&self) -> HashMap<String, u8> {
+        problem_marks(&self.lsp.diags, self.scan_found())
     }
 
     pub fn diag_at_cursor(&self) -> Option<(u8, String)> {
@@ -842,6 +1162,22 @@ impl Editor {
     }
 
     pub(crate) fn lsp_code_actions(&mut self) {
+        // ren's own fixes come first; the servers' answers are added below them.
+        let local = self.local_actions();
+        self.ca_menu_open = !local.is_empty();
+        if !local.is_empty() {
+            self.menu = Some(Menu {
+                title: "Code actions".into(),
+                items: local,
+                sel: 0,
+                scroll: 0,
+                anchor: self.menu_anchor.take(),
+                dir: None,
+                filter: None,
+                base: Vec::new(),
+                ws_symbols: false,
+            });
+        }
         let Some(first) = self.ready_lang("codeActionProvider") else {
             return;
         };
@@ -853,7 +1189,6 @@ impl Editor {
             .filter(|id| self.lsp.ready(id) && self.lsp.cap(id, "codeActionProvider"))
             .collect();
         self.ca_pending = targets.len();
-        self.ca_menu_open = false;
         for lang in targets {
             self.code_actions_from(lang);
         }
@@ -888,21 +1223,7 @@ impl Editor {
     }
 
     fn on_hover(&mut self, r: Value) {
-        let text = markup_text(&r["contents"]);
-        let mut lines: Vec<String> = Vec::new();
-        for l in text.lines() {
-            let l = l.trim_end();
-            if l.starts_with("```") {
-                continue;
-            }
-            if l.is_empty() && lines.last().is_none_or(|x| x.is_empty()) {
-                continue;
-            }
-            lines.push(l.replace("&nbsp;", " "));
-        }
-        while lines.last().is_some_and(|l| l.is_empty()) {
-            lines.pop();
-        }
+        let mut lines = hover_lines(&r);
         if lines.is_empty() {
             self.info("No information");
         } else {
@@ -1268,6 +1589,7 @@ impl Editor {
         let items = words
             .into_iter()
             .map(|w| CItem {
+                suffix: String::new(),
                 filter: w.to_lowercase(),
                 sort: w.clone(),
                 text: w.clone(),
@@ -1344,6 +1666,7 @@ impl Editor {
                     }
                 }
                 CItem {
+                    suffix: it["labelDetails"]["detail"].as_str().unwrap_or("").trim().to_string(),
                     filter: it["filterText"].as_str().unwrap_or(&label).to_lowercase(),
                     sort: it["sortText"].as_str().unwrap_or(&label).to_string(),
                     kind: it["kind"].as_u64().unwrap_or(0),
@@ -1433,6 +1756,15 @@ impl Editor {
             .map(|l| self.lsp.enc(l))
             .unwrap_or(Enc::Utf16);
         let unit = self.indent_unit();
+        // Edits that come with the item (auto-import `use` lines). Servers like
+        // rust-analyzer only work them out on resolve, against the text as it is
+        // now: ask before changing anything, or the answer comes back empty.
+        let mut extra = it.extra.clone();
+        if extra.is_empty() && !it.raw.is_null() {
+            if let Some(r) = self.resolve_completion(it.raw.clone()) {
+                extra = r["additionalTextEdits"].as_array().cloned().unwrap_or_default();
+            }
+        }
         let b = &mut self.bufs[self.cur];
         let y = b.cy;
         let len = b.line_len(y);
@@ -1480,10 +1812,7 @@ impl Editor {
             }
             None => endp,
         };
-        let resolve = it.extra.is_empty() && !it.raw.is_null();
-        let raw = it.raw.clone();
-        if !it.extra.is_empty() {
-            let extra = it.extra.clone();
+        if !extra.is_empty() {
             let d = self.apply_text_edits(self.cur, &extra, enc, Some(y));
             ny = (ny as isize + d).max(0) as usize;
             if d != 0 {
@@ -1494,22 +1823,45 @@ impl Editor {
         b.cy = ny.min(b.last());
         b.cx = nx;
         b.sync_want();
-        if resolve {
-            if let Some(lang) = self.cur_cap("completionProvider") {
-                let can = self.lsp.servers.get(lang).is_some_and(|s| {
-                    s.caps["completionProvider"]["resolveProvider"]
-                        .as_bool()
-                        .unwrap_or(false)
-                });
-                if can {
-                    let cur = self.cur;
-                    self.lsp
-                        .request(lang, "completionItem/resolve", raw, Pending::CompResolve(cur));
-                }
-            }
-        }
         if chars.last() == Some(&')') && new_off.is_some() {
             self.trigger_signature();
+        }
+    }
+
+    /// Resolves a completion item and waits for the answer (up to
+    /// `RESOLVE_TIMEOUT`) while the buffer is still as the server saw it. A late
+    /// answer is applied by `on_comp_resolve` when it arrives.
+    fn resolve_completion(&mut self, item: Value) -> Option<Value> {
+        let lang = self.cur_cap("completionProvider")?;
+        let can = self.lsp.servers.get(lang).is_some_and(|s| {
+            s.caps["completionProvider"]["resolveProvider"]
+                .as_bool()
+                .unwrap_or(false)
+        });
+        if !can {
+            return None;
+        }
+        self.lsp_sync(self.cur);
+        let id = self
+            .lsp
+            .request(lang, "completionItem/resolve", item, Pending::CompResolve(self.cur))?;
+        let deadline = Instant::now() + RESOLVE_TIMEOUT;
+        loop {
+            for ev in self.lsp.poll() {
+                match ev {
+                    LspEvent::Response {
+                        id: rid,
+                        result,
+                        error: None,
+                        ..
+                    } if rid == id => return Some(result),
+                    ev => self.on_lsp_event(ev),
+                }
+            }
+            if !self.lsp.is_pending(lang, id) || Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -1614,8 +1966,9 @@ impl Editor {
         if let Some(d) = m.dir.clone() {
             match k.code {
                 KeyCode::Backspace | KeyCode::Left => {
+                    let project = matches!(m.items.first(), Some((_, MenuAction::OpenProject(_))));
                     if let Some(p) = d.parent() {
-                        self.folder_picker(p.to_path_buf(), Some(d));
+                        self.folder_picker(p.to_path_buf(), Some(d), project);
                     }
                     return;
                 }
@@ -1770,6 +2123,7 @@ impl Editor {
 
     pub(crate) fn menu_choose(&mut self, idx: usize) {
         let Some(m) = self.menu.take() else { return };
+        let project = matches!(m.items.first(), Some((_, MenuAction::OpenProject(_))));
         let Some((_, act)) = m.items.into_iter().nth(idx) else {
             return;
         };
@@ -1778,7 +2132,8 @@ impl Editor {
             MenuAction::Jump(p, l, c, e) => self.jump_to(&p, l, c, e),
             MenuAction::Cmd(c) => self.context_cmd(c),
             MenuAction::Run(s) => self.run_command(&s),
-            MenuAction::Dir(p) => self.folder_picker(p, None),
+            MenuAction::Dir(p) => self.folder_picker(p, None, project),
+            MenuAction::OpenProject(p) => self.open_project(&p),
             MenuAction::OpenDir(p) => {
                 self.open_path(&p);
                 let name = self.tree.root_name();
@@ -1787,10 +2142,16 @@ impl Editor {
         }
     }
 
-    pub(crate) fn folder_picker(&mut self, dir: PathBuf, from: Option<PathBuf>) {
+    /// Browses folders. `project`: the chosen folder opens as a new project
+    /// instead of replacing this one's tree.
+    pub(crate) fn folder_picker(&mut self, dir: PathBuf, from: Option<PathBuf>, project: bool) {
         self.enter_edit();
-        let mut items: Vec<(String, MenuAction)> =
-            vec![("✓  Open this folder".into(), MenuAction::OpenDir(dir.clone()))];
+        let open = if project {
+            ("✓  Open as a project".into(), MenuAction::OpenProject(dir.clone()))
+        } else {
+            ("✓  Open this folder".into(), MenuAction::OpenDir(dir.clone()))
+        };
+        let mut items: Vec<(String, MenuAction)> = vec![open];
         match dir.parent() {
             Some(p) => items.push(("↑  ..".into(), MenuAction::Dir(p.to_path_buf()))),
             None if cfg!(windows) => {
@@ -1953,9 +2314,6 @@ impl Editor {
                 for b in self.bufs.iter_mut() {
                     if b.lang.name == lang {
                         b.lsp_open = false;
-                        if let Some(p) = &b.path {
-                            self.lsp.diags.remove(&path_key(p));
-                        }
                     }
                 }
                 self.info("Language server stopped");
@@ -2159,9 +2517,60 @@ impl Editor {
     }
 }
 
+/// See `Editor::problem_marks`.
+fn problem_marks(diags: &HashMap<String, Vec<Diag>>, scanned: Vec<(&String, u8)>) -> HashMap<String, u8> {
+    let mut marks: HashMap<String, u8> = HashMap::new();
+    let served = diags.iter().filter_map(|(key, ds)| {
+        let sev = ds.iter().map(|d| d.sev).filter(|s| (1..=2).contains(s)).min()?;
+        Some((key, sev))
+    });
+    for (key, sev) in served.chain(scanned) {
+        for p in Path::new(key).ancestors() {
+            let m = marks.entry(path_key(p)).or_insert(sev);
+            *m = (*m).min(sev);
+        }
+    }
+    marks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn problem_marks_take_the_worst() {
+        let d = |sev: u8| Diag {
+            server: "Rust",
+            l0: 0,
+            c0: 0,
+            l1: 0,
+            c1: 1,
+            sev,
+            msg: String::new(),
+            raw: Value::Null,
+            enc: Enc::Utf16,
+        };
+        let mut diags = HashMap::new();
+        diags.insert("/p/src/a.rs".to_string(), vec![d(2), d(1)]); // both: error
+        diags.insert("/p/src/b.rs".to_string(), vec![d(2), d(3)]); // warning
+        diags.insert("/p/lib/c.rs".to_string(), vec![d(3), d(4)]); // info/hint only
+        diags.insert("/p/lib/d.rs".to_string(), vec![]);
+        diags.insert("/p/doc/e.rs".to_string(), vec![d(2)]);
+        let m = problem_marks(&diags, Vec::new());
+        assert_eq!(m.get("/p/src/a.rs"), Some(&1));
+        assert_eq!(m.get("/p/src/b.rs"), Some(&2));
+        assert_eq!(m.get("/p/lib/c.rs"), None);
+        assert_eq!(m.get("/p/lib"), None);
+        // Folders take the worst inside them.
+        assert_eq!(m.get("/p/src"), Some(&1));
+        assert_eq!(m.get("/p/doc"), Some(&2));
+        assert_eq!(m.get("/p"), Some(&1));
+        // A checker's findings count too, and the worst still wins.
+        let (x, y) = ("/p/lib/x.py".to_string(), "/p/src/b.rs".to_string());
+        let m = problem_marks(&diags, vec![(&x, 2), (&y, 1)]);
+        assert_eq!(m.get("/p/lib"), Some(&2));
+        assert_eq!(m.get("/p/src/b.rs"), Some(&1));
+    }
 
     fn kind(lsp: Option<u64>, label: &str, line: &str, x: usize) -> &'static str {
         hint_kind(lsp, label, &line.chars().collect::<Vec<_>>(), x)
@@ -2175,6 +2584,57 @@ mod tests {
         assert_eq!(kind(Some(1), ": number", "function f(a) {", 13), "returnTypes");
         assert_eq!(kind(Some(1), "Iter<'_, i32>", "    .iter()", 11), "chaining");
         assert_eq!(kind(None, "fn main", "}", 1), "closingBraces");
+    }
+
+    #[test]
+    fn module_files() {
+        let root = std::env::temp_dir().join(format!("ren-mod-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/utils")).unwrap();
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        for f in [
+            "Cargo.toml",
+            "src/main.rs",
+            "src/utils/mod.rs",
+            "src/utils/deep.rs",
+            "src/orphan.rs",
+        ] {
+            fs::write(root.join(f), "").unwrap();
+        }
+        let src = root.join("src");
+        // A file next to main.rs is declared there; one in a folder, in its mod.rs.
+        assert_eq!(
+            module_parents(&src.join("orphan.rs")),
+            Some(("orphan".into(), vec![src.join("main.rs")]))
+        );
+        assert_eq!(
+            module_parents(&src.join("utils/mod.rs")),
+            Some(("utils".into(), vec![src.join("main.rs")]))
+        );
+        assert_eq!(
+            module_parents(&src.join("utils/deep.rs")),
+            Some(("deep".into(), vec![src.join("utils/mod.rs")]))
+        );
+        assert!(is_crate_root(&src.join("main.rs")) && is_crate_root(&src.join("bin/tool.rs")));
+        assert!(!is_crate_root(&src.join("orphan.rs")));
+        assert!(module_parents(&std::env::temp_dir().join("loose.rs")).is_none_or(|(_, p)| p.is_empty()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(is_rust_ident("my_mod2") && !is_rust_ident("my-mod") && !is_rust_ident("2x"));
+    }
+
+    #[test]
+    fn mod_line_position() {
+        let lines = |s: &str| s.lines().map(|l| l.chars().collect::<Vec<_>>()).collect::<Vec<_>>();
+        // After the last `mod x;`; inline `mod tests {` doesn't count.
+        assert_eq!(
+            mod_insert_line(&lines("mod a;\npub mod b;\n\nfn main() {}\nmod tests {")),
+            (2, false)
+        );
+        // No mods yet: at the top, below inner docs and attributes.
+        assert_eq!(
+            mod_insert_line(&lines("//! Crate docs\n#![allow(x)]\nuse std::fs;")),
+            (2, true)
+        );
     }
 
     #[test]

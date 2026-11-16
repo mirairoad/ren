@@ -1,8 +1,8 @@
 use crate::buffer::{char_width, disp_col};
-use crate::editor::{Editor, Focus, Layout, Mode, MENU_ROWS, POPUP_ROWS, TAB_H};
+use crate::editor::{selector_label, Editor, Focus, Layout, Mode, MENU_ROWS, POPUP_ROWS, PROJECTS_TITLE, SHOWN, TAB_H};
 use crate::highlight::{self, Tok};
 use crate::icons;
-use crate::lsp::from_lsp_col;
+use crate::lsp::{from_lsp_col, path_key};
 use crate::screen::{Screen, Style};
 use crossterm::style::Color;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -82,6 +82,37 @@ fn put_virtual(s: &mut Screen, l: &Layout, scroll_x: usize, sy: u16, v: usize, t
         x += w;
     }
     text.width()
+}
+
+/// Breaks a line into pieces at most `width` columns wide, at spaces when it can.
+fn wrap(line: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cw = 0;
+    for word in line.split_inclusive(' ') {
+        let ww = text_w(word);
+        if cw + ww > width && cw > 0 {
+            out.push(cur.trim_end().to_string());
+            cur.clear();
+            cw = 0;
+        }
+        if ww > width {
+            for c in word.chars() {
+                let w = char_width(c, 0);
+                if cw + w > width {
+                    out.push(std::mem::take(&mut cur));
+                    cw = 0;
+                }
+                cur.push(c);
+                cw += w;
+            }
+        } else {
+            cur.push_str(word);
+            cw += ww;
+        }
+    }
+    out.push(cur.trim_end().to_string());
+    out
 }
 
 fn sev_color(sev: u8) -> Color {
@@ -211,6 +242,7 @@ impl Editor {
         self.draw_sig(s, &l);
         self.draw_popup(s);
         self.draw_hover(s, &l);
+        self.draw_peek(s);
         self.draw_commit(s, &l);
         self.draw_menu(s, &l);
     }
@@ -252,15 +284,22 @@ impl Editor {
         true
     }
 
-    /// Two rows: a padding row on top, the labels below it. The open tab takes
-    /// the editor's background, with a primary line just above its label.
+    /// A row and a half: the labels' row, and the lower half of the row above
+    /// it (`▄`), so the tabs stand taller than one row without a tall dark
+    /// band. The open tab takes the editor's background, with a primary line
+    /// just above its label.
     fn draw_tabs(&mut self, s: &mut Screen) {
-        for y in 0..TAB_H {
-            s.fill_row(y, Style::new().on(BAR));
+        for y in 0..TAB_H - 1 {
+            s.fill_row(y, Style::new());
+            for c in 0..s.w {
+                s.put_char(c, y, '▄', Style::fg(BAR));
+            }
         }
+        s.fill_row(TAB_H - 1, Style::new().on(BAR));
         let y = TAB_H - 1;
         self.tab_spans.clear();
-        let mut x = 0u16;
+        let marks = self.problem_marks();
+        let mut x = self.draw_project_selector(s, y);
         for (i, b) in self.bufs.iter().enumerate() {
             let active = i == self.cur;
             let mut st = if active {
@@ -289,12 +328,17 @@ impl Editor {
                 nx = s.put(nx, y, " ", st);
             }
             let label = format!(" {}{} ", b.name, if b.dirty { " ●" } else { "" });
-            let nx = s.put(nx, y, &label, st);
+            // Red title when the file has errors, yellow when only warnings.
+            let mut lst = st;
+            if let Some(&sev) = b.path.as_ref().and_then(|p| marks.get(&path_key(p))) {
+                lst.fg = sev_color(sev);
+            }
+            let nx = s.put(nx, y, &label, lst);
             // The open tab's line sits at the bottom of the padding row, right on
             // top of its label.
             if active {
                 for c in x0..nx.min(s.w) {
-                    s.put_char(c, y - 1, '▁', Style::fg(primary()).on(BAR));
+                    s.put_char(c, y - 1, '▁', Style::fg(primary()));
                 }
             }
             self.tab_spans.push((x0, nx, i, close_x));
@@ -310,22 +354,42 @@ impl Editor {
         }
     }
 
+    /// The first spot of the tab bar: the project on screen, by its folder's
+    /// name. A click lists the open projects and "Open folder…". Returns where
+    /// the tabs start.
+    fn draw_project_selector(&mut self, s: &mut Screen, y: u16) -> u16 {
+        let open = self.menu.as_ref().is_some_and(|m| m.title == PROJECTS_TITLE);
+        let bg = if open { SEL } else { BAR };
+        let st = Style::fg(primary()).on(bg).bold();
+        let mut x = s.put(0, y, " ", st);
+        if self.settings.icons {
+            let (ic, col) = if open { icons::FOLDER_OPEN } else { icons::FOLDER };
+            let mut ist = st;
+            ist.fg = col;
+            x += s.put_char(x, y, ic, ist);
+            x = s.put(x, y, " ", st);
+        }
+        x = s.put(x, y, &selector_label(&self.tree.root), st);
+        let mut chev = Style::fg(DIM).on(bg);
+        if self.project_count() > 1 {
+            chev.fg = BRIGHT;
+        }
+        x = s.put(x, y, " ▾ ", chev);
+        self.proj_span = (0, x.min(s.w));
+        x = s.put(x, y, "│", Style::fg(SEL).on(BAR));
+        x
+    }
+
     fn draw_tree(&self, s: &mut Screen, l: &Layout) {
         let t = &self.tree;
         let focused = self.focus == Focus::Tree;
         let w = l.tree_w;
-        let header = format!(" {}", t.root_name().to_uppercase());
-        s.put(
-            0,
-            l.top,
-            &header,
-            Style::fg(if focused { primary() } else { DIM }).bold(),
-        );
+        // No title row: the project selector in the tab bar names the folder.
         let open_path = self.buf().path.as_deref();
-        let rows = l.side_h.saturating_sub(1) as usize;
-        for r in 0..rows {
+        let marks = self.problem_marks();
+        for r in 0..l.side_h as usize {
             let i = t.scroll + r;
-            let y = l.top + 1 + r as u16;
+            let y = l.top + r as u16;
             let Some(n) = t.nodes.get(i) else { break };
             let selected = i == t.sel;
             let mut st = if n.is_dir {
@@ -366,7 +430,13 @@ impl Editor {
                 x += s.put_char(x, y, ic, ist);
                 x += s.put_char(x, y, ' ', st);
             }
-            put_clip(s, x, y, &n.name, st, w.saturating_sub(x) as usize);
+            // Red name when the file (or something in the folder) has errors,
+            // yellow when only warnings.
+            let mut nst = st;
+            if let Some(&sev) = marks.get(&path_key(&n.path)) {
+                nst.fg = sev_color(sev);
+            }
+            put_clip(s, x, y, &n.name, nst, w.saturating_sub(x) as usize);
         }
         for r in 0..l.side_h {
             s.put_char(l.tree_w, l.top + r, '│', Style::fg(primary()));
@@ -387,8 +457,14 @@ impl Editor {
         hits.clear();
         let area_x = l.ed_x;
         let area_w = l.ed_w;
-        let recent_n = self.recent.len().min(5);
+        // Sessions are numbered first, recent folders after them, up to 9.
+        let sess_n = self.sessions.len().min(SHOWN);
+        let recent_n = self.recent.len().min(5).min(9 - sess_n);
         let mut need = 3 + 2 + 2 + keys.len();
+        let show_sessions = sess_n > 0 && (l.text_h as usize) >= need + 3 + sess_n;
+        if show_sessions {
+            need += 2 + sess_n;
+        }
         let show_recent = recent_n > 0 && (l.text_h as usize) >= need + 3 + recent_n;
         if show_recent {
             need += 2 + recent_n;
@@ -434,17 +510,44 @@ impl Editor {
             }
             y += 1;
         }
+        let room = (area_w as usize).saturating_sub((kx - area_x) as usize + 2);
+        if show_sessions {
+            y += 1;
+            s.put(kx, y, "Sessions", Style::fg(BRIGHT).bold());
+            let more = if self.sessions.iter().any(|se| !se.earlier.is_empty()) {
+                "   :session for all, with earlier checkpoints"
+            } else if self.sessions.len() > sess_n {
+                "   :session for all"
+            } else {
+                ""
+            };
+            put_clip(s, kx + 8, y, more, Style::fg(DIM), room.saturating_sub(8));
+            y += 1;
+            for (i, se) in self.sessions.iter().take(sess_n).enumerate() {
+                s.put(kx, y, &(i + 1).to_string(), Style::fg(primary()));
+                let nx = put_clip(s, kx + 3, y, &se.title(), Style::fg(BRIGHT), 26.min(room));
+                let px = (kx + 3 + 26).max(nx + 2);
+                let (base, warn) = se.detail();
+                let left = room.saturating_sub((px - kx) as usize);
+                let wx = put_clip(s, px, y, &base, Style::fg(DIM), left);
+                if !warn.is_empty() {
+                    let left = room.saturating_sub((wx - kx) as usize);
+                    put_clip(s, wx, y, &format!(" · {}", warn), Style::fg(TYPE), left);
+                }
+                hits.push((y, crate::editor::SPLASH_SESSION + i));
+                y += 1;
+            }
+        }
         if show_recent {
             y += 1;
             s.put(kx, y, "Recent folders", Style::fg(BRIGHT).bold());
             y += 1;
-            let room = (area_w as usize).saturating_sub((kx - area_x) as usize + 2);
             for (i, p) in self.recent.iter().take(recent_n).enumerate() {
                 let name = p
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| p.display().to_string());
-                s.put(kx, y, &(i + 1).to_string(), Style::fg(primary()));
+                s.put(kx, y, &(sess_n + i + 1).to_string(), Style::fg(primary()));
                 let nx = put_clip(s, kx + 3, y, &name, Style::fg(BRIGHT), 22.min(room));
                 let px = (kx + 3 + 22).max(nx + 2);
                 let full = p.display().to_string();
@@ -679,7 +782,11 @@ impl Editor {
         let right = format!(
             "{}{}{}  {}  {}:{}  {:>3}% ",
             selinfo,
-            self.lsp_status().map(|s| s + "  ").unwrap_or_default(),
+            [self.scan_status(), self.lsp_status()]
+                .into_iter()
+                .flatten()
+                .map(|s| s + "  ")
+                .collect::<String>(),
             if b.lang.name == "Metin" { "Text" } else { b.lang.name },
             if b.crlf { "CRLF" } else { "LF" },
             b.cy + 1,
@@ -780,10 +887,18 @@ impl Editor {
         let vis = &p.shown[p.scroll..p.scroll + rows];
         let labw = vis
             .iter()
-            .map(|&i| text_w(&p.items[i].label))
+            .map(|&i| {
+                let it = &p.items[i];
+                text_w(&it.label)
+                    + if it.suffix.is_empty() {
+                        0
+                    } else {
+                        1 + text_w(&it.suffix)
+                    }
+            })
             .max()
             .unwrap_or(0)
-            .min(42);
+            .min(60);
         let detw = vis
             .iter()
             .map(|&i| text_w(&p.items[i].detail))
@@ -807,7 +922,11 @@ impl Editor {
             s.fill(x0, y, w, Style::new().on(bg));
             let (k, kc) = kind_info(it.kind);
             put_clip(s, x0 + 1, y, k, Style::fg(kc).on(bg), 4);
-            let lx = put_clip(s, x0 + 6, y, &it.label, Style::fg(BRIGHT).on(bg), labw);
+            let mut lx = put_clip(s, x0 + 6, y, &it.label, Style::fg(BRIGHT).on(bg), labw);
+            if !it.suffix.is_empty() {
+                let room = (x0 + 6 + labw as u16).saturating_sub(lx + 1) as usize;
+                lx = put_clip(s, lx + 1, y, &it.suffix, Style::fg(DIM).on(bg), room);
+            }
             if detw > 0 {
                 let dx = (x0 + 6 + labw as u16 + 2).max(lx + 1);
                 let room = (x0 + w).saturating_sub(dx + 1) as usize;
@@ -842,6 +961,124 @@ impl Editor {
             }
             x += s.put_char(x, y, c, st);
         }
+    }
+
+    /// The box for the code under a resting mouse: each problem (severity, who
+    /// found it, the message, a docs link), the server's hover, then the quick
+    /// fixes, which highlight under the mouse. Below the line when it fits.
+    fn draw_peek(&self, s: &mut Screen) {
+        self.peek_rect.set(None);
+        self.peek_rows.borrow_mut().clear();
+        let Some(p) = &self.peek else { return };
+        if p.diags.is_empty() && p.info.is_empty() && p.actions.is_empty() {
+            return;
+        }
+        let maxw = (s.w as usize).saturating_sub(4).clamp(20, 84);
+        let inner = maxw - 4;
+        // Rows of (segments, quick fix index); None = a divider.
+        type Row = Option<(Vec<(String, Style)>, Option<usize>)>;
+        let mut rows: Vec<Row> = Vec::new();
+        let text = |t: String, st: Style| Some((vec![(t, st)], None));
+        for (n, d) in p.diags.iter().enumerate() {
+            if n > 0 {
+                rows.push(text(String::new(), Style::new().on(POP)));
+            }
+            let (icon, word) = match d.sev {
+                1 => ("✖", "error"),
+                2 => ("▲", "warning"),
+                3 => ("ℹ", "info"),
+                _ => ("·", "hint"),
+            };
+            let c = sev_color(d.sev);
+            rows.push(Some((
+                vec![
+                    (format!("{} {}", icon, word), Style::fg(c).on(POP).bold()),
+                    (format!("  {}", d.source), Style::fg(DIM).on(POP)),
+                ],
+                None,
+            )));
+            for l in &d.lines {
+                for w in wrap(l, inner) {
+                    rows.push(text(w, Style::fg(BRIGHT).on(POP)));
+                }
+            }
+            if let Some(link) = &d.link {
+                rows.push(text(format!("→ {}", link), Style::fg(DIM).on(POP).italic()));
+            }
+        }
+        if !p.info.is_empty() {
+            if !rows.is_empty() {
+                rows.push(None);
+            }
+            for (k, l) in p.info.iter().enumerate() {
+                let st = if k == 0 {
+                    Style::fg(FUNC).on(POP)
+                } else {
+                    Style::fg(BRIGHT).on(POP)
+                };
+                for w in wrap(l, inner) {
+                    rows.push(text(w, st));
+                }
+            }
+        }
+        if !p.diags.is_empty() && (!p.actions.is_empty() || p.waiting > 0) {
+            rows.push(None);
+            if p.actions.is_empty() {
+                rows.push(text("Looking for quick fixes…".into(), Style::fg(DIM).on(POP).italic()));
+            }
+            for (i, (t, _)) in p.actions.iter().enumerate() {
+                let bg = if p.hot == Some(i) { SEL } else { POP };
+                rows.push(Some((
+                    vec![
+                        ("⚡ ".into(), Style::fg(TYPE).on(bg)),
+                        (t.clone(), Style::fg(BRIGHT).on(bg)),
+                    ],
+                    Some(i),
+                )));
+            }
+        }
+        let room = (s.h as usize).saturating_sub(TAB_H as usize + 3);
+        rows.truncate(room.max(1));
+        let content_w = rows
+            .iter()
+            .flatten()
+            .map(|(segs, _)| segs.iter().map(|(t, _)| text_w(t)).sum::<usize>())
+            .max()
+            .unwrap_or(0);
+        let w = (content_w + 4).clamp(24, maxw) as u16;
+        let h = rows.len() as u16 + 2;
+        let (cx, cy) = p.cell;
+        let bar = s.h.saturating_sub(1);
+        let y0 = if cy + 1 + h <= bar {
+            cy + 1
+        } else {
+            cy.saturating_sub(h).max(TAB_H)
+        };
+        let x0 = cx.saturating_sub(2).min(s.w.saturating_sub(w));
+        draw_box(s, x0, y0, w, h, "");
+        for (r, row) in rows.iter().enumerate() {
+            let y = y0 + 1 + r as u16;
+            match row {
+                None => {
+                    for x in x0 + 1..x0 + w - 1 {
+                        s.put_char(x, y, '─', Style::fg(BORDER).on(POP));
+                    }
+                }
+                Some((segs, act)) => {
+                    if let Some(i) = act {
+                        let bg = if p.hot == Some(*i) { SEL } else { POP };
+                        s.fill(x0 + 1, y, w - 2, Style::new().on(bg));
+                        self.peek_rows.borrow_mut().push((y, *i));
+                    }
+                    let mut x = x0 + 2;
+                    for (t, st) in segs {
+                        let left = (x0 + w - 2).saturating_sub(x) as usize;
+                        x = put_clip(s, x, y, t, *st, left);
+                    }
+                }
+            }
+        }
+        self.peek_rect.set(Some((x0, y0, w, h)));
     }
 
     fn draw_hover(&self, s: &mut Screen, l: &Layout) {

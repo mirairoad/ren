@@ -453,6 +453,7 @@ impl Editor {
         for t in self.terms.iter_mut() {
             changed |= t.poll();
         }
+        self.parked_tick();
         let l = self.layout();
         let visible = l.dbg_h > 0;
         if visible && self.panel_tab == PanelTab::Terminal {

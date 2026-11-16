@@ -1,4 +1,5 @@
 mod buffer;
+mod comments;
 mod config;
 mod containers;
 mod dap;
@@ -60,11 +61,55 @@ fn restore() {
     let _ = out.flush();
 }
 
+/// The read end of an empty pipe that takes the terminal's place on a hang-up.
+#[cfg(unix)]
+static HUP_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// SIGHUP (the terminal window closed) and SIGTERM set a flag: the loop sees
+/// it, the session is saved and ren leaves.
+#[cfg(unix)]
+fn catch_hangup() {
+    use std::sync::atomic::Ordering::Relaxed;
+    extern "C" fn on_signal(_: libc::c_int) {
+        editor::HANGUP.store(true, Relaxed);
+        // crossterm keeps reading a hung-up terminal forever (it gets nothing,
+        // never "would block"), so the loop would never see the flag. An
+        // empty non-blocking pipe in its place makes the read give up.
+        let fd = HUP_FD.load(Relaxed);
+        if fd >= 0 {
+            unsafe {
+                libc::dup2(fd, libc::STDIN_FILENO);
+            }
+        }
+    }
+    unsafe {
+        let mut p = [0 as libc::c_int; 2];
+        if libc::pipe(p.as_mut_ptr()) == 0 {
+            for fd in p {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            let fl = libc::fcntl(p[0], libc::F_GETFL);
+            libc::fcntl(p[0], libc::F_SETFL, fl | libc::O_NONBLOCK);
+            // The write end stays open, so reads say "nothing yet", not "end".
+            HUP_FD.store(p[0], Relaxed);
+        }
+        let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGHUP, handler);
+        libc::signal(libc::SIGTERM, handler);
+    }
+}
+
+#[cfg(not(unix))]
+fn catch_hangup() {}
+
 fn run(ed: &mut Editor) -> io::Result<()> {
     let mut out = BufWriter::with_capacity(1 << 16, io::stdout());
     let mut screen = Screen::new(ed.w, ed.h);
     let mut redraw = true;
     loop {
+        if editor::hangup() {
+            return Ok(());
+        }
         if redraw {
             screen.resize(ed.w, ed.h);
             ed.draw(&mut screen);
@@ -109,6 +154,8 @@ fn main() -> io::Result<()> {
         Some("-h") | Some("--help") => {
             println!("ren {}", env!("CARGO_PKG_VERSION"));
             println!("usage: ren [file | folder]");
+            println!("       ren --resume [n | n.k]   pick a saved session (or restore session n,");
+            println!("                                n.k: its checkpoint k steps back)");
             println!("       ren --init   create ~/.ren/settings.json if missing");
             println!("Type :help inside the editor for all shortcuts.");
             return Ok(());
@@ -128,11 +175,28 @@ fn main() -> io::Result<()> {
             }
             return Ok(());
         }
+        Some("--restore") => {
+            // After `:reload`: the session it saved.
+            let id = std::env::args().nth(2).unwrap_or_default();
+            let (w, h) = terminal::size()?;
+            let mut ed = Editor::new(None, w, h);
+            ed.reloaded(&id);
+            return run_app(ed);
+        }
+        Some("--resume") | Some("-r") => {
+            // The saved sessions, to pick one (also after a crash or a kill).
+            let pick = std::env::args().nth(2);
+            let (w, h) = terminal::size()?;
+            let mut ed = Editor::new(None, w, h);
+            ed.resume(pick.as_deref());
+            return run_app(ed);
+        }
         Some("--session") => {
+            // `:reload` from an older ren, which kept one session per folder.
             let root = std::env::args().nth(2);
             let (w, h) = terminal::size()?;
             let mut ed = Editor::new(root, w, h);
-            ed.restore_session();
+            ed.restore_legacy();
             return run_app(ed);
         }
         Some("-V") | Some("--version") => {
@@ -154,22 +218,30 @@ fn run_app(mut ed: Editor) -> io::Result<()> {
         default_hook(info);
     }));
 
+    catch_hangup();
     setup()?;
     let res = run(&mut ed);
-    ed.lsp.stop_all();
-    ed.clean_exit();
+    // The terminal went away (or wouldn't take output): keep everything,
+    // unsaved text included, for the session list.
+    let gone = res.is_err() || editor::hangup();
+    if gone {
+        ed.hangup_exit();
+    } else {
+        ed.clean_exit();
+    }
+    ed.stop_servers();
     restore();
     if ed.reload && res.is_ok() {
-        return restart(&ed.tree.root);
+        return restart(ed.session_id());
     }
     res
 }
 
 /// `:reload`: replaces this process with a fresh ren that restores the session.
-fn restart(root: &std::path::Path) -> io::Result<()> {
+fn restart(id: &str) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--session").arg(root);
+    cmd.arg("--restore").arg(id);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

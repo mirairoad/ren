@@ -17,6 +17,7 @@ pub const DEFAULT_FILE: &str = r##"{
   },
   "formatOnSave": true,
   "icons": true,
+  "scan": true,
   "inlayHints": {
     "enabled": true,
     "types": true,
@@ -131,6 +132,8 @@ pub struct Settings {
     pub primary: u32,
     pub format_on_save: bool,
     pub icons: bool,
+    /// Check the whole project when it opens and after saves (scan.rs).
+    pub scan: bool,
     /// Types and parameter names from the language server, drawn in the code.
     pub inlay: InlayHints,
     /// Language (lowercase, e.g. "python") → server command lines.
@@ -148,6 +151,7 @@ impl Default for Settings {
             primary: DEFAULT_PRIMARY,
             format_on_save: true,
             icons: true,
+            scan: true,
             inlay: InlayHints::default(),
             lsp_servers: BTreeMap::new(),
             lsp_format: BTreeMap::new(),
@@ -369,6 +373,11 @@ pub fn from_value(v: &Value) -> (Settings, Vec<String>) {
         Value::Null => {}
         Value::Bool(b) => s.icons = *b,
         _ => errs.push("icons must be true or false".into()),
+    }
+    match &v["scan"] {
+        Value::Null => {}
+        Value::Bool(b) => s.scan = *b,
+        _ => errs.push("scan must be true or false".into()),
     }
     match &v["inlayHints"] {
         Value::Null => {}

@@ -24,9 +24,17 @@ mod git_ui;
 mod ide;
 #[path = "panel.rs"]
 mod panel;
+#[path = "peek.rs"]
+mod peek;
+#[path = "projects.rs"]
+mod projects;
+pub use projects::{selector_label, PROJECTS_TITLE};
+#[path = "scan.rs"]
+mod scan;
 #[path = "session.rs"]
 pub mod session;
 pub use ide::{Menu, Popup, MENU_ROWS, POPUP_ROWS};
+pub use session::SHOWN;
 
 pub const NONAME: &str = "[untitled]";
 const HELP_NAME: &str = "[help]";
@@ -42,6 +50,14 @@ pub static KITTY: AtomicBool = AtomicBool::new(false);
 
 pub fn kitty() -> bool {
     KITTY.load(Ordering::Relaxed)
+}
+
+/// Set from the SIGHUP / SIGTERM handler: the terminal is gone (or someone
+/// asked ren to stop), so main saves the session and leaves.
+pub static HANGUP: AtomicBool = AtomicBool::new(false);
+
+pub fn hangup() -> bool {
+    HANGUP.load(Ordering::Relaxed)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,9 +167,11 @@ const COMMANDS: &[&str] = &[
     "lsp",
     "mkdir",
     "mkfile",
+    "mod",
     "mv",
     "open",
     "panel",
+    "project",
     "pwd",
     "q",
     "q!",
@@ -167,6 +185,8 @@ const COMMANDS: &[&str] = &[
     "revert",
     "rm",
     "save",
+    "scan",
+    "session",
     "settings",
     "symbols",
     "terminal",
@@ -191,6 +211,8 @@ fn arg_words(cmd: &str) -> &'static [&'static str] {
         "containers" => &["start", "stop", "restart", "shell", "refresh"],
         "debug" => &["config", "stop", "restart", "args", "program"],
         "recover" => &["discard"],
+        "session" | "sessions" => &["forget", "list"],
+        "project" | "proj" => &["close", "list", "open"],
         "install" | "uninstall" => &["codelldb", "debugpy", "delve"],
         _ => &[],
     }
@@ -244,6 +266,18 @@ pub struct Editor {
     pub cmd_hint: Option<String>,
     /// Tab completion on the `:` line, shown as a list above the bar.
     pub cmd_comp: Option<CmdComp>,
+    /// Counts the times a language server finished its background work.
+    pub(crate) lsp_idle_gen: u64,
+    /// The mouse resting on text: the spot, its screen cell, since when.
+    pub(crate) rest: Option<(Pos, (u16, u16), Instant)>,
+    /// The box that opens when the mouse rests on code (`peek.rs`).
+    pub peek: Option<peek::Peek>,
+    pub peek_rect: Cell<Option<(u16, u16, u16, u16)>>,
+    /// Screen rows of the box's quick fixes: (y, fix).
+    pub peek_rows: RefCell<Vec<(u16, usize)>>,
+    peek_seq: u64,
+    /// Problems in files that aren't open (see scan.rs).
+    scan: scan::Scan,
     /// Set by horizontal wheel scrolling: the view no longer follows the cursor
     /// until the next key or click.
     hscroll_free: bool,
@@ -283,7 +317,19 @@ pub struct Editor {
     /// Set by `:reload`: main restarts ren after the loop ends.
     pub reload: bool,
     autosave_at: Instant,
+    /// What the session file holds, to write it only when something changed.
     autosave_sig: u64,
+    /// This ren's session folder in `~/.ren/sessions/` (`session.rs`), and the
+    /// lock that tells other rens it's still open.
+    session_id: String,
+    session_lock: Option<fs::File>,
+    /// The session's latest checkpoint: what was open at the last write (a
+    /// hash), since when (unix secs), and how many tabs had unsaved text.
+    ckpt_shape: u64,
+    ckpt_since: u64,
+    ckpt_unsaved: usize,
+    /// Saved sessions of earlier runs, for the welcome screen and `:session`.
+    pub sessions: Vec<session::SessionInfo>,
     gitignore_asked: bool,
     /// Code-action requests still out, and whether their menu is showing.
     ca_pending: usize,
@@ -298,10 +344,19 @@ pub struct Editor {
     pub commit: Option<git_ui::CommitForm>,
     pub commit_cursor: Cell<Option<(u16, u16)>>,
     last_template: usize,
+    /// Open projects in selector order; the one on screen is `None` here (its
+    /// state is in the fields above), the others are parked (`projects.rs`).
+    projects: Vec<Option<Box<projects::Project>>>,
+    /// The project on screen.
+    proj: usize,
+    /// The project selector in the tab bar: start and end x.
+    pub proj_span: (u16, u16),
 }
 
 pub const SPLASH_OPEN: usize = 1000;
 pub const SPLASH_HELP: usize = 1001;
+/// Welcome-screen sessions: this plus the session's place in the list.
+pub const SPLASH_SESSION: usize = 2000;
 
 fn is_ctrl(k: &KeyEvent) -> bool {
     k.modifiers.contains(KeyModifiers::CONTROL) && !k.modifiers.contains(KeyModifiers::ALT)
@@ -338,7 +393,14 @@ impl Editor {
                 let _ = env::set_current_dir(&p);
                 opened_dir = true;
             } else {
+                // Through symlinks to the real path, as the tree's root (the
+                // working directory) is: otherwise `/tmp/x/a.rs` and the tree's
+                // `/private/tmp/x/a.rs` are two files to ren and its servers.
                 let abs = absolute(&p);
+                let abs = match (abs.parent().map(fs::canonicalize), abs.file_name()) {
+                    (Some(Ok(dir)), Some(name)) => dir.join(name),
+                    _ => abs,
+                };
                 match Buffer::open(&abs) {
                     Ok(b) => {
                         if !abs.exists() {
@@ -384,6 +446,13 @@ impl Editor {
             tab_hover: None,
             cmd_hint: None,
             cmd_comp: None,
+            lsp_idle_gen: 0,
+            rest: None,
+            peek: None,
+            peek_rect: Cell::new(None),
+            peek_rows: RefCell::new(Vec::new()),
+            peek_seq: 0,
+            scan: Default::default(),
             hscroll_free: false,
             last_edit: None,
             history: Vec::new(),
@@ -421,6 +490,12 @@ impl Editor {
             reload: false,
             autosave_at: Instant::now(),
             autosave_sig: 0,
+            session_id: session::new_id(),
+            session_lock: None,
+            ckpt_shape: 0,
+            ckpt_since: 0,
+            ckpt_unsaved: 0,
+            sessions: Vec::new(),
             gitignore_asked: false,
             ca_pending: 0,
             ca_menu_open: false,
@@ -433,7 +508,11 @@ impl Editor {
             commit: None,
             commit_cursor: Cell::new(None),
             last_template: 0,
+            projects: vec![None],
+            proj: 0,
+            proj_span: (0, 0),
         };
+        ed.sessions = session::list_sessions(&ed.session_id);
         let errs = ed.load_settings();
         if !errs.is_empty() && ed.msg.is_none() {
             ed.error(errs.join("; "));
@@ -722,6 +801,8 @@ impl Editor {
         if self.mode != Mode::Command {
             self.msg = None;
         }
+        self.peek = None;
+        self.rest = None;
         let ctrl = is_ctrl(&k);
         // Ctrl+Esc swaps between Edit and Command from anywhere.
         if k.code == KeyCode::Esc && ctrl {
@@ -806,7 +887,7 @@ impl Editor {
             KeyCode::Char('b') => self.toggle_tree(),
             KeyCode::Char('k') => {
                 let d = self.tree.root.clone();
-                self.folder_picker(d, None);
+                self.folder_picker(d, None, false);
             }
             KeyCode::Char('f') => self.open_find(false),
             KeyCode::Char('h') => self.open_find(true),
@@ -817,6 +898,7 @@ impl Editor {
             KeyCode::Char('Z') | KeyCode::Char('y') => self.redo_any(),
             KeyCode::Char('z') => self.undo_any(),
             KeyCode::Char('t') => self.workspace_symbols(),
+            KeyCode::Char('r') => self.project_menu(),
             KeyCode::Char('O') => self.lsp_document_symbols(),
             KeyCode::Char('o') if shift => self.lsp_document_symbols(),
             KeyCode::Char('o') => self.jump_back(),
@@ -836,6 +918,8 @@ impl Editor {
             }
             KeyCode::PageDown => self.cycle_buf(1),
             KeyCode::PageUp => self.cycle_buf(-1),
+            // Ctrl+/ arrives as Ctrl+7 (0x1F) without kitty keys, Ctrl+_ on some terminals.
+            KeyCode::Char('/') | KeyCode::Char('7') | KeyCode::Char('_') if in_editor => self.toggle_comment(),
             KeyCode::Char('a') if in_editor => self.select_all(),
             KeyCode::Char('c') if in_editor => self.copy(),
             KeyCode::Char('x') if in_editor => self.cut(),
@@ -876,7 +960,7 @@ impl Editor {
     }
 
     fn tree_rows(&self) -> usize {
-        self.layout().side_h.saturating_sub(1) as usize
+        self.layout().side_h as usize
     }
 
     fn tree_follow(&mut self) {
@@ -1073,6 +1157,145 @@ impl Editor {
         self.buf_mut().preview = false;
     }
 
+    /// Ctrl+/: comments or uncomments the line, or every selected line. Only the
+    /// marker at the start of a line (after its indent) counts, so
+    /// `// a // b` becomes `a // b`. When every non-blank line is commented the
+    /// markers come off (with one space after them); otherwise each line gets
+    /// `// ` at the block's smallest indent, so the markers line up. Blank lines
+    /// are left alone. One undo step.
+    ///
+    /// The markers depend on the file type (`comments.rs`): `//`, `#`, `--`,
+    /// `;`, `%`… Types without line comments get a block comment around the
+    /// lines instead: `/* … */` in CSS, `<!-- … -->` in HTML, XML and Markdown.
+    fn toggle_comment(&mut self) {
+        let b = self.buf();
+        let style = crate::comments::style_for(b.path.as_deref(), b.lang);
+        let (y0, y1) = match self.sel_range() {
+            // A selection ending at the start of a line doesn't take that line.
+            Some((a, e)) if e.0 == 0 && e.1 > a.1 => (a.1, e.1 - 1),
+            Some((a, e)) => (a.1, e.1),
+            None => (b.cy, b.cy),
+        };
+        if !style.line.is_empty() {
+            self.toggle_line_comments(style.line, y0, y1);
+        } else if let Some((open, close)) = style.block {
+            self.toggle_block_comment(open, close, y0, y1);
+        } else {
+            self.error("This file type has no comments");
+        }
+    }
+
+    fn toggle_line_comments(&mut self, toks: &[&str], y0: usize, y1: usize) {
+        let first = toks[0];
+        let indent = |l: &[char]| l.iter().take_while(|c| **c == ' ' || **c == '\t').count();
+        // Width of the comment marker a line starts with (after its indent), if any.
+        let marker = |l: &[char]| {
+            let i = indent(l);
+            toks.iter()
+                .map(|t| t.chars().collect::<Vec<char>>())
+                .find(|t| l[i..].starts_with(t))
+                .map(|t| t.len())
+        };
+        let b = self.buf();
+        let rows: Vec<usize> = (y0..=y1)
+            .filter(|&y| !b.lines[y].iter().all(|c| c.is_whitespace()))
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let uncomment = rows.iter().all(|&y| marker(&b.lines[y]).is_some());
+        let col = rows.iter().map(|&y| indent(&b.lines[y])).min().unwrap_or(0);
+        self.begin_edit(EditKind::Other);
+        let mut cur = self.cursor();
+        let mut anchor = self.sel;
+        let b = self.buf_mut();
+        // Keeps a position on line `y` on the same text after `n` chars change at `at`.
+        let shift = |p: &mut Pos, y: usize, at: usize, n: isize| {
+            if p.1 == y && p.0 >= at {
+                p.0 = (p.0 as isize + n).max(at as isize) as usize;
+            }
+        };
+        for &y in &rows {
+            if uncomment {
+                let i = indent(&b.lines[y]);
+                let mut n = marker(&b.lines[y]).unwrap_or(0);
+                if b.lines[y].get(i + n) == Some(&' ') {
+                    n += 1;
+                }
+                b.delete_text((i, y), (i + n, y));
+                shift(&mut cur, y, i, -(n as isize));
+                if let Some(a) = anchor.as_mut() {
+                    shift(a, y, i, -(n as isize));
+                }
+            } else {
+                let mut ins: Vec<char> = first.chars().collect();
+                ins.push(' ');
+                b.insert_text((col, y), &ins);
+                shift(&mut cur, y, col, ins.len() as isize);
+                if let Some(a) = anchor.as_mut() {
+                    shift(a, y, col, ins.len() as isize);
+                }
+            }
+        }
+        b.cx = cur.0.min(b.line_len(cur.1));
+        b.sync_want();
+        self.sel = anchor;
+    }
+
+    /// One block comment around lines `y0..=y1` (from the first non-blank
+    /// line's indent to the last one's end), or off again when they already
+    /// start with `open` and end with `close`.
+    fn toggle_block_comment(&mut self, open: &str, close: &str, y0: usize, y1: usize) {
+        let (oc, cc): (Vec<char>, Vec<char>) = (open.chars().collect(), close.chars().collect());
+        let b = self.buf();
+        let rows: Vec<usize> = (y0..=y1)
+            .filter(|&y| !b.lines[y].iter().all(|c| c.is_whitespace()))
+            .collect();
+        let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
+            return;
+        };
+        let fi = b.lines[first].iter().take_while(|c| c.is_whitespace()).count();
+        let end = |l: &[char]| l.len() - l.iter().rev().take_while(|c| c.is_whitespace()).count();
+        let le = end(&b.lines[last]);
+        let room = first != last || le >= fi + oc.len() + cc.len();
+        let wrapped = room && b.lines[first][fi..].starts_with(&oc) && b.lines[last][..le].ends_with(&cc);
+        self.begin_edit(EditKind::Other);
+        let mut cur = self.cursor();
+        let mut anchor = self.sel;
+        let b = self.buf_mut();
+        // The close goes first: it is the later edit, so `fi` stays valid on one line.
+        let delta = if wrapped {
+            let mut cs = le - cc.len();
+            if cs > fi + oc.len() && b.lines[last][cs - 1] == ' ' {
+                cs -= 1;
+            }
+            b.delete_text((cs, last), (le, last));
+            let mut n = oc.len();
+            if b.lines[first].get(fi + n) == Some(&' ') {
+                n += 1;
+            }
+            b.delete_text((fi, first), (fi + n, first));
+            -(n as isize)
+        } else {
+            let mut tail = vec![' '];
+            tail.extend(&cc);
+            b.insert_text((le, last), &tail);
+            let mut head = oc.clone();
+            head.push(' ');
+            b.insert_text((fi, first), &head);
+            head.len() as isize
+        };
+        for p in std::iter::once(&mut cur).chain(anchor.as_mut()) {
+            if p.1 == first && p.0 >= fi {
+                p.0 = (p.0 as isize + delta).max(fi as isize) as usize;
+            }
+            p.0 = p.0.min(b.line_len(p.1));
+        }
+        b.cx = cur.0;
+        b.sync_want();
+        self.sel = anchor;
+    }
+
     /// Prepares a cursor move: Shift extends the selection, otherwise it is dropped.
     fn start_move(&mut self, extend: bool) {
         self.last_edit = None;
@@ -1140,7 +1363,13 @@ impl Editor {
         if self.is_splash() && !ctrl && !alt {
             if let KeyCode::Char(c) = k.code {
                 if let Some(d) = c.to_digit(10).filter(|d| *d >= 1) {
-                    if let Some(p) = self.recent.get(d as usize - 1).cloned() {
+                    // Sessions come first on the welcome screen, then folders.
+                    let d = d as usize;
+                    let shown = self.sessions.len().min(SHOWN);
+                    if d <= shown {
+                        return self.open_session(d, 0);
+                    }
+                    if let Some(p) = self.recent.get(d - shown - 1).cloned() {
                         return self.open_path(&p);
                     }
                 }
@@ -1928,15 +2157,20 @@ impl Editor {
             "revert" => self.revert(),
             "open" => match rest.first() {
                 Some(p) => {
-                    let p = self.resolve_path(p);
-                    self.open_path(&p);
+                    // `/x` is the workspace's x, unless only a real `/x` exists.
+                    let mut path = self.resolve_path(p);
+                    if p.starts_with('/') && !path.exists() && Path::new(p).exists() {
+                        path = absolute(Path::new(p));
+                    }
+                    self.open_path(&path);
                 }
                 None => {
                     let d = self.tree.root.clone();
-                    self.folder_picker(d, None);
+                    self.folder_picker(d, None, false);
                 }
             },
             "tree" => self.toggle_tree(),
+            "project" | "proj" => self.project_command(&rest),
             "cd" => {
                 let target = rest
                     .first()
@@ -1960,7 +2194,10 @@ impl Editor {
             "settings" => self.open_settings(arg),
             "reload" => self.reload_app(),
             "recover" => self.recover(arg),
+            "session" | "sessions" => self.session_command(&rest),
             "hints" => self.hints_command(&rest),
+            "scan" => self.scan_command(),
+            "mod" => self.link_module(rest.first().map(String::as_str)),
             "icons" => {
                 self.settings.icons = !self.settings.icons;
                 self.info(format!(
@@ -2085,6 +2322,7 @@ impl Editor {
                 self.info(format!("\"{}\" {}L {}B written{}", name, n, bytes, fmt.note()));
                 self.tree.refresh();
                 self.lsp_did_save();
+                self.scan_saved();
                 if self.is_settings_file(self.cur) {
                     let errs = self.load_settings();
                     if errs.is_empty() {
@@ -2109,7 +2347,10 @@ impl Editor {
         self.sel = None;
         if self.bufs.len() == 1 {
             if quit_if_last {
-                self.quit = true;
+                // `:q!` drops this tab's changes, not another project's.
+                if self.parked_saved() {
+                    self.quit = true;
+                }
             } else {
                 self.lsp_close_buf(0);
                 self.bufs[0] = Buffer::scratch(NONAME);
@@ -2169,6 +2410,9 @@ impl Editor {
                 self.cur = i;
                 let name = self.bufs[i].name.clone();
                 return self.error(format!("\"{}\" is not saved (:qa! to discard)", name));
+            }
+            if !self.parked_saved() {
+                return;
             }
         }
         self.quit = true;
@@ -2325,6 +2569,9 @@ impl Editor {
             self.hover = None;
         }
         self.tab_hover = self.tab_at(m.column, m.row).map(|t| t.2);
+        if self.peek_mouse(&m) {
+            return;
+        }
         if self.mouse_overlays(&m) {
             return;
         }
@@ -2396,6 +2643,9 @@ impl Editor {
                 self.last_edit = None;
                 self.hscroll_free = false;
                 if y < l.top {
+                    if y == TAB_H - 1 && x >= self.proj_span.0 && x < self.proj_span.1 {
+                        return self.project_menu();
+                    }
                     if let Some((_, _, i, close_x)) = self.tab_at(x, y) {
                         if x == close_x {
                             return self.close_tab(i);
@@ -2426,11 +2676,7 @@ impl Editor {
                 if over_tree {
                     self.enter_edit();
                     self.focus = Focus::Tree;
-                    let row = (y - l.top) as usize;
-                    if row == 0 {
-                        return;
-                    }
-                    let i = self.tree.scroll + row - 1;
+                    let i = self.tree.scroll + (y - l.top) as usize;
                     if i < self.tree.nodes.len() {
                         self.tree.sel = i;
                         if self.clicks >= 2 || self.tree.nodes[i].is_dir {
@@ -2449,9 +2695,10 @@ impl Editor {
                     match hit {
                         Some(SPLASH_OPEN) => {
                             let d = self.tree.root.clone();
-                            self.folder_picker(d, None);
+                            self.folder_picker(d, None, false);
                         }
                         Some(SPLASH_HELP) => self.open_help(),
+                        Some(i) if i >= SPLASH_SESSION => self.open_session(i - SPLASH_SESSION + 1, 0),
                         Some(i) => {
                             if let Some(p) = self.recent.get(i).cloned() {
                                 self.open_path(&p);

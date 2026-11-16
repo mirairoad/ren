@@ -23,6 +23,9 @@ EDITING
   Ctrl+C / Ctrl+X / Ctrl+V         copy / cut / paste (no selection = the whole line)
   Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z)   undo / redo
   Tab / Shift+Tab                  indent / outdent (the selected lines)
+  Ctrl+/                           comment / uncomment the line or selected lines
+                                   (only the leading marker: // a // b → a // b)
+                                   per file type: // # -- ; % … or /* */ <!-- -->
   Ctrl+Backspace / Ctrl+Delete     delete word left / right
   Ctrl+S                           save (formats first when formatOnSave is on)
   Ctrl+F / Ctrl+H                  find / find and replace
@@ -33,14 +36,30 @@ TABS AND WINDOWS
   Ctrl+B          show / hide the side panel (file tree, or git with :git)
   Ctrl+W          cycle focus: editor → side panel → bottom panel
   Ctrl+`          bottom panel: Terminal | Debug | Containers (needs kitty keys; or :panel)
-  Ctrl+K          open a folder
+  Ctrl+K          open a folder (in place of this project's)
+  Ctrl+R          projects: the first tab (the folder's name ▾) lists the open
+                  projects, the one on screen ticked (● = unsaved changes), and
+                  "Open folder…" to open another. Each project keeps its own tabs,
+                  tree, language servers, terminals, debugger and git; containers
+                  are shared. :project lists them · :project <n> switches ·
+                  :project <folder> opens one · :project close closes this one
   :q  :q!         close the tab (:q! drops unsaved changes; quits on the last tab)
   :w  :wq  :x     save / save and close the tab (:w <path> saves as)
   tab ×           hover a tab: its icon turns into ×; click it (or middle-click the
                   tab) to close. Unsaved: opens : for q! (discard) or wq (save)
   :qa :qa!        quit
   :reload         restart ren and come back to the same place (unsaved text is kept)
-  :recover        reopen unsaved tabs left by a session that crashed (:recover discard)
+  sessions        what's open (every project, its tabs, unsaved text) is saved as you
+                  work, and at once if the terminal closes. The welcome screen lists
+                  recent sessions: press the number (or click) to reopen all of it.
+                  "interrupted" = it didn't close cleanly. :session lists them,
+                  :session <n> restores, :session forget <n> deletes one.
+                  Each keeps 2 earlier checkpoints (what was open before the last
+                  changes, or before a quit discarded unsaved text): ↳ rows in
+                  :session; :session <n>.<k> restores the one k steps back.
+                  From the shell: ren --resume (the list), ren --resume 2.1
+  :recover        restore the newest interrupted session with unsaved text
+                  (:recover discard drops its unsaved copies)
 
 FILE TREE
   ↑/↓ PgUp/PgDn Home/End   move
@@ -100,13 +119,22 @@ LANGUAGE SERVER (LSP) — starts automatically; the project's .venv / node_modul
 first, then PATH. Several servers per language via "lsp.servers" in settings.
   Ctrl+Space   completion (Tab / Enter accepts)
   F1           hover documentation (or the value of a variable while debugging)
+  Rest the mouse on code for a second: a box with the problems there (what,
+  which tool and rule, a docs link), the type/docs, and quick fixes to click.
+  It closes when the mouse leaves the spot and the box, or on any key.
   F12 / Ctrl+click   go to definition       Shift+F12   references
   Ctrl+O       jump back                     F2          rename symbol
   Ctrl+.       code actions (from every server)
   Ctrl+Shift+O document symbols              Ctrl+T      workspace symbols
   F8 / Shift+F8  next / previous diagnostic
+  Red file names (tabs and tree) have errors, yellow ones only warnings;
+  a folder shows the worst of what's inside it. A second after a folder opens
+  the whole project is checked (Rust, Go, Python, TypeScript), and again after
+  saves, in the background. :scan checks again now; "scan": false turns it off.
   Inlay hints: types and parameter names in dim italics (not part of the file).
   :format :diag :actions :def :refs :symbols :wsymbols :hover :rename <name>
+  :mod [parent]  Rust: declare this file in its parent module (`mod name;`).
+               Files no `mod` reaches get nothing from rust-analyzer; ren warns.
   :lsp  :lsp restart  :lsp stop
 
 DEBUGGER (DAP)

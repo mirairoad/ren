@@ -4,7 +4,7 @@
 
 <h1 align="center">ren</h1>
 
-<p align="center">A terminal IDE written in Rust: type-to-edit with Unix-style <code>:</code> commands, full mouse support, built-in LSP, debugger, git panel, terminal and containers.</p>
+<p align="center">A terminal IDE written in Rust that edits like any ordinary editor: no vim modes or motions, Unix-style <code>:</code> commands for files, several projects in one window, and sessions that come back after a crash. Full mouse support, built-in LSP, debugger, git panel, terminal and containers.</p>
 
 > **ren** (錬 — to refine, to temper) is a fork of [zetsu](https://github.com/erenmentes/zetsu) by Eren Menteş (MIT),
 > being reshaped 1:1 around how I write code. This repository starts a fresh history from zetsu `v0.3.0`;
@@ -12,14 +12,50 @@
 
 ---
 
+## How ren works
+
+### No vim: you just type
+
+There is no Normal or Insert mode, and no motions, operators, registers or counts to learn. Typing always goes into the file, and the keys do what they do in any desktop editor:
+
+- arrows, `Home`/`End`, `PgUp`/`PgDn` move; `Ctrl+←/→` jumps a word; Shift with any of them selects;
+- `Ctrl+C` / `Ctrl+X` / `Ctrl+V` copy, cut and paste (the whole line when nothing is selected), synced with the system clipboard;
+- `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+S` saves, `Ctrl+F` finds, `Ctrl+A` selects all, `Tab` / `Shift+Tab` indent;
+- the mouse clicks, drags, double-clicks a word, triple-clicks a line, scrolls, and resizes the file tree.
+
+The one other place you type is the `:` command line at the bottom (`Ctrl+Esc` or `Ctrl+G`, or `Esc` in terminals without the kitty keyboard protocol). Commands are words, not key chords: `:git`, `:format`, `:debug`, `:help`. A number jumps to that line. A few short names are kept for muscle memory (`:w`, `:q`, `:wq`, `:qa`).
+
+### Files: the shell commands you already know
+
+Files are managed with the same commands as in a shell, typed on the `:` line:
+
+```
+:touch src/parser.rs          create a file (and any missing folders)
+:mkdir src/cli/args           create folders
+:mv old.rs new.rs             move or rename; open tabs follow
+:cp config.toml config.bak    copy (into a folder when the target is one)
+:duplicate main.rs            copy next to it as main_copy.rs
+:rm build.log                 remove
+:cd ../other  :pwd  :open notes.md  :!cargo test
+```
+
+`Tab` completes commands and paths. Paths starting with `/` are from the workspace root (`/src/x.rs`), `~/` from your home, and anything else from the folder you're in (the tree's selection, or the open file's folder).
+
+Nothing is deleted for real: `:rm`, and anything `:cp` or `:mv` would overwrite, goes to the project's `.bin/`. `Ctrl+Z` in the file tree undoes file commands, even after a restart (`:bin` shows what's there, `:bin empty` empties it). `:!cmd` runs any shell command, with its output in a tab.
+
+### Several projects in one window
+
+The first tab is not a file: it shows the open folder's name, and clicking it (or `Ctrl+R`) lists your open projects with "Open folder…" at the end. Each project has its own tabs, file tree, language servers, terminals, debugger and git panel, and keeps running while you work in another. See [Projects](#projects).
+
+### Sessions that come back
+
+What you have open (every project, its tabs and cursors, and unsaved text) is saved as you work. A crash, a killed process or a closed terminal loses a few seconds at most. The welcome screen lists recent sessions, and `ren --resume` lists them all with earlier checkpoints, so you can go back to one later. Every ren window has its own session. See [Sessions](#sessions).
+
 ## Features
 
-- **Two modes, no vim** — you always type into the file (Edit); `Ctrl+Esc` swaps to the `:` command line (Command). Shift+arrows/mouse select, `Ctrl+C/X/V/Z/Y/S` do what they do everywhere.
-- **Unix-style file commands** — `:touch`, `:mkdir`, `:cp`, `:mv`, `:duplicate`, `:rm` with paths from the workspace root (`/src/x.rs`), home (`~/`) or the current folder. Nothing is deleted: removed and overwritten files go to `.bin/`, and `Ctrl+Z` in the file tree undoes file commands, even after a restart.
 - **Git panel** (`:git`) — staged and unstaged files with checkboxes, side-by-side diffs, staging of single lines, branches, stash, push/pull and a commit form built from your own templates.
 - **Bottom panel** (`` Ctrl+` ``), under the editor (the file tree keeps its full height) — a real terminal (several sessions; hover a tab for its × to kill it), the debugger, and a Containers tab for Docker-compatible sockets (status, start/stop/restart, live logs, shell into a container).
-- **File tree** — Space previews a file without leaving the tree, Enter opens it; optional Nerd Font file icons.
-- **`:reload`** — restarts ren (new settings, new binary) and puts you back where you were, unsaved text included. Unsaved tabs are also kept safe for crash recovery (`:recover`).
+- **File tree** — Space previews a file without leaving the tree, Enter opens it; optional Nerd Font file icons. Files with errors show red (in the tree and on their tab), files with only warnings yellow, and folders take the worst colour of what's inside. The whole project is checked when it opens, not only the files you open (see Project scan).
 - **Language Server Protocol** — completion (including auto-imports and snippet expansion), diagnostics with rule codes, hover, go to definition, references, code actions with resolve support, signature help, rename, document formatting, and inlay hints (types and parameter names drawn in the code, like VS Code). Servers come from the project's `.venv` / `node_modules/.bin` first, then `PATH`, and several can run for one language (e.g. basedpyright + ruff).
 - **Mouse** — click to place the cursor, drag to select, double/triple click for word/line selection, scroll, tab switching, context menu, Ctrl+click to jump to a definition, resizable file tree.
 - **Debugger (DAP)** — breakpoints, stepping, variables tree, call stack, watches and a debug console. Works with CodeLLDB, lldb-dap and gdb for Rust/C/C++, debugpy for Python and Delve for Go. Missing adapters are downloaded on first use, Rust projects are built automatically, Python runs in the project's `.venv`, and `.vscode/launch.json` configurations can be picked from the Debug tab.
@@ -88,6 +124,8 @@ Re-run it after pulling or editing to update. Instances that are already open ke
 ren                 # start screen
 ren path/to/dir     # open a workspace
 ren src/main.rs     # open a file
+ren --resume        # pick a saved session (ren --resume 2, or 2.1 for a checkpoint)
+ren --help          # all options
 ```
 
 Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in terminals without the kitty keyboard protocol) opens the command line.
@@ -98,16 +136,21 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 |---|---|
 | typing | edits the file — there is no Normal/Insert mode |
 | `Ctrl+Esc` | swap between editing and the `:` command line |
+| `Ctrl+G` | the `:` command line (type a line number to jump there) |
 | `Esc` | close popup / selection / find bar (opens `:` when nothing is left, without kitty keys) |
-| Shift + arrows, mouse drag | select |
+| Shift + arrows, mouse drag | select (`Ctrl+A` selects all) |
+| `Ctrl+←` / `Ctrl+→` | word left / right (`Ctrl+Backspace` / `Ctrl+Delete` delete a word) |
+| `Tab` / `Shift+Tab` | indent / outdent the line or the selected lines |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | copy / cut / paste (the whole line when nothing is selected) |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo (in the file tree: undo / redo file commands) |
 | `Ctrl+S` | save |
+| `Ctrl+/` | comment / uncomment the line or the selected lines (only the marker at the line start: `// a // b` → `a // b`). The marker follows the file type (`//`, `#`, `--`, `;`, `%`, …); CSS, HTML, XML and Markdown get a block comment (`/* … */`, `<!-- … -->`) |
 | `Ctrl+F` / `Ctrl+H` | find / find and replace |
 | `Ctrl+B` | toggle the side panel (file tree, or git with `:git`) |
 | `Ctrl+W` | cycle focus: editor → side panel → bottom panel |
 | `` Ctrl+` `` | bottom panel: Terminal, Debug, Containers (or `:panel`) |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab |
+| `Ctrl+R` | project list: switch project, or "Open folder…" (same as clicking the first tab) |
 | `:q` / `:qa` | close tab / quit |
 | `:w` / `:wq` | save / save and close the tab |
 | hover a tab | its icon turns into ×: click it (or middle-click the tab) to close; unsaved tabs open `:` for `q!` / `wq` |
@@ -130,10 +173,15 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 | `:duplicate <path>` | copy as `name_copy.ext` |
 | `:rm <path>` | move to `.bin/` |
 | `:bin`, `:bin empty` | bin status / empty it |
+| `:open <path>`, `:save <path>`, `:revert` | open a file / save as / reload from disk |
+| `:cd <dir>`, `:pwd` | change this project's folder / show it |
+| `:!<cmd>` | run a shell command, output in a tab (`%` is the current file) |
 | `:git …` | `init`, `add`, `reset`, `commit [msg]`, `push`, `pull`, `stash`, `branch`, `checkout [-b]` |
 | `:terminal`, `:containers` | open those panel tabs |
 | `:settings [project]` | global or project settings |
-| `:reload`, `:recover` | restart in place / recover unsaved tabs after a crash |
+| `:project`, `:project <n>`, `:project <folder>`, `:project close` | list the open projects / switch to the n-th / open a folder as a project / close the one on screen |
+| `:session`, `:session <n>`, `:session <n>.<k>`, `:session forget <n>` | list saved sessions and their checkpoints / restore one (all its projects) / restore its checkpoint k steps back / delete one (see [Sessions](#sessions)) |
+| `:reload`, `:recover` | restart in place / restore the newest interrupted session with unsaved text |
 
 Paths: `/x` is the workspace root, `~/x` your home, and anything else is relative to the folder you're in (the tree selection, or the active file's folder). Quotes only matter for spaces.
 
@@ -144,6 +192,7 @@ Paths: `/x` is the workspace root, `~/x` your home, and anything else is relativ
 | `Tab` / `Enter` | accept completion |
 | `Ctrl+Space` | trigger completion |
 | `F1` | hover documentation |
+| mouse resting on code (1 s) | a box with the problems there (severity, tool and rule code, full message, docs link), the type / docs, and clickable quick fixes |
 | `F12`, `Ctrl+Click` | go to definition |
 | `Ctrl+O` | jump back |
 | `Shift+F12` | references |
@@ -155,6 +204,7 @@ Paths: `/x` is the workspace root, `~/x` your home, and anything else is relativ
 | `:format` | format document |
 | `:diag` | list diagnostics |
 | `:lsp`, `:lsp restart` | server status / restart |
+| `:scan` | check the whole project again now (red/yellow file names) |
 
 ### Debugging
 
@@ -166,6 +216,77 @@ Paths: `/x` is the workspace root, `~/x` your home, and anything else is relativ
 | `F10` / `F11` / `Shift+F11` | step over / into / out |
 | `F6` | pause |
 | `F1` | evaluate the expression under the cursor while paused |
+
+## Projects
+
+The first tab is the project selector: the open folder's name with a `▾`. Click it, or press `Ctrl+R`, for the list:
+
+- the open projects, the one on screen ticked, `●` next to one with unsaved changes;
+- **Open folder…** at the end: pick a folder and it opens as another project.
+
+Picking a project swaps everything on screen to it. Each project has its own:
+
+- tabs, cursors and unsaved changes, file tree and focus;
+- language servers and project scan (the red and yellow file names);
+- terminals in the bottom panel, the debugger and its breakpoints;
+- git panel and commit form, and `.bin/`;
+- project settings (`.ren/settings.json`).
+
+Projects you're not looking at keep running. Their terminals keep going, and their language servers stay up: what they report is picked up when you switch back. Containers are shared by all projects, since they belong to the Docker socket rather than to a folder.
+
+| Command | Action |
+|---|---|
+| `:project` | the project list (same as clicking the first tab) |
+| `:project <n>` | switch to the n-th project |
+| `:project <folder>` | open a folder as a project (or switch to it if it's open) |
+| `:project open` | the folder picker, to open one as a project |
+| `:project close` | close the project on screen |
+
+`:qa` with unsaved changes in another project switches to that project and says which file (`:qa!` quits anyway). `Ctrl+K`, a recent folder on the welcome screen, and `:cd` change the folder of the project on screen; use the selector to open one alongside it.
+
+## Sessions
+
+Every running ren saves a session: all its projects in selector order, the one on screen, each project's tabs with their cursors and scroll, the file tree (shown, width, open folders, selection), the bottom panel and focus, and copies of unsaved text. Terminal contents and debug sessions are not saved; they start fresh.
+
+**When it's saved**
+
+- a few seconds after anything changes (and only when something did);
+- at once when the terminal closes (hang-up) or ren gets `SIGTERM`, unsaved text included;
+- on a clean quit, marked clean and without the unsaved text, which quitting discarded. Text thrown away by `:qa!` still stays one checkpoint back (see below).
+
+A crash or `kill -9` loses at most the last few seconds. A session that didn't close cleanly shows as "interrupted", with its unsaved tabs; when it left unsaved text, ren points at it when it starts.
+
+**Several windows.** Each ren window has its own session and holds a lock on it while it runs, so another ren never lists or takes over a session that's still open. If the terminal app closes with three ren windows in it, all three are saved and listed, even when they had the same folders open.
+
+**Getting one back**
+
+- The welcome screen lists recent sessions above the recent folders. Press the number or click it.
+- `ren --resume` (or `ren -r`) opens ren on the full list. `ren --resume 2` restores session 2 straight away.
+- Inside ren, `:session` shows the same list. `:recover` restores the newest interrupted session that has unsaved text.
+
+Restoring brings back all of the session's projects in their order, with their tabs and unsaved text (marked unsaved, not written to disk). In a ren that has just started, the session replaces the empty start; otherwise its projects join the ones already open. The ren that restores a session saves into it from then on.
+
+**Checkpoints.** Besides its latest state, each session keeps the two before it. A new checkpoint starts when what's open (projects, and tabs other than previews) changes after staying the same for at least a minute; quicker changes, like opening several files in a row, just update the latest state. So a project or a set of tabs you closed by accident is still one step back, and so is unsaved text a quit threw away. They show as `↳` rows under their session:
+
+```
+1  beta + alpha   3 tabs · just now · ⚠ interrupted · 2 unsaved
+↳  beta + alpha   5 tabs · 14 min ago · ⚠ 1 unsaved
+↳  beta           2 tabs · 1 h ago
+2  gamma          1 tab · 2 d ago
+```
+
+`ren --resume 1.1` or `:session 1.1` restores the checkpoint one step back. Going back keeps the newer states as checkpoints, so it can be undone.
+
+| Command | Action |
+|---|---|
+| `ren --resume`, `:session` | list sessions and their checkpoints (Enter restores) |
+| `ren --resume <n>`, `:session <n>` | restore session n |
+| `ren --resume <n>.<k>`, `:session <n>.<k>` | restore its checkpoint k steps back |
+| `:session forget <n>` | delete session n |
+| `:recover`, `:recover discard` | restore the newest interrupted session with unsaved text / drop its unsaved copies |
+| `:reload` | restart ren (new settings, a new build) and come back through the same session |
+
+Sessions live in `~/.ren/sessions/`, one folder per session. ren keeps the 12 newest, one per set of projects, plus older ones that still hold unsaved text or went down together with the newest (several windows closed by one crash).
 
 ## Debugger
 
@@ -213,6 +334,21 @@ ren looks for these servers in the project first (`.venv/bin`, `venv/bin`, `node
 
 **Inlay hints** are asked for once typing pauses, and move with your edits until the server answers again. rust-analyzer, gopls, clangd and basedpyright send them; ren turns on gopls's and TypeScript's (both off by default), and rust-analyzer's closure return types. pyright, the first Python server in the list, has none, but basedpyright does. Each kind (types, parameter names, return types, chain types, closing braces) can be switched off in `inlayHints` (see Configuration). `:hints` opens a checkbox menu to switch them for the session, and `:hints types` / `:hints off` do it from the command line.
 
+**Rust files must be part of the crate.** rust-analyzer only works on files reached from `main.rs` / `lib.rs` through `mod name;` lines; a new file nobody declares gets no completion, hints or errors. ren checks this and warns on line 1 (`Not in the crate: add mod x; to src/main.rs`). `Ctrl+.` or `:mod` inserts the line into the parent module, unsaved.
+
+**Project scan.** A second after a folder opens, ren checks the whole project, so the tree shows red and yellow names before you open anything:
+
+| Project (marker at the root) | How |
+|---|---|
+| Rust (`Cargo.toml`) | starts rust-analyzer, which runs `cargo check` (again on every save) |
+| Go (`go.mod`) | starts gopls, which checks every package |
+| Python (`pyproject.toml`, `setup.py`, …) | starts pyright/basedpyright in workspace mode (every file, live); runs `ruff check` when ruff is one of the Python servers |
+| TypeScript (`tsconfig.json`) | runs `tsc --noEmit` (incremental) when `tsc` is in `node_modules/.bin` or on `PATH` |
+
+It doesn't slow ren down: the servers and checkers are separate programs and ren only reads their results. The command-line checkers (ruff, tsc) run again after a save of a file of their language (or of `pyproject.toml`, `tsconfig.json`, …), in the background, one at a time, at low priority (`nice`), and a rerun waits at least as long as the last run took, so a slow `tsc` on a big project gets at most half the CPU time. They don't run while you type: they read the saved files, and the open file's problems already come live from its server. An open file shows its server's view; the checkers' results count for files no server watches. `:scan` checks again now (e.g. after a `git pull`), and `"scan": false` turns it off for big projects (a project's `.ren/settings.json` can do it for just that one).
+
+One server runs for every project of a language: opening a file from another project (another `Cargo.toml`, `package.json`, …) adds that folder to the running server.
+
 By default one server runs per language: the first one found, in the order listed. To run several at once, list them in `lsp.servers` (see Configuration): diagnostics and code actions are merged, formatting goes to the `lsp.format` server, and hover/definition/completion go to the first server that supports them. Diagnostics show their source and rule code, e.g. `` `os` imported but unused [Ruff F401] ``.
 
 The workspace root is resolved from project markers (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`, `compile_commands.json`, `.git`). When no server is available, completion falls back to words from open buffers.
@@ -258,6 +394,7 @@ Everything lives in `~/.ren/` (`%USERPROFILE%\.ren\` on Windows). The installer 
 | `theme.primary` | `"#DA56D1"` | primary colour (`#RRGGBB` or `#RGB`): logo, focused panels, badges, find and debug highlights |
 | `formatOnSave` | `true` | format through the language server before writing (`Ctrl+S`, `:save`) |
 | `icons` | `true` | Nerd Font file-type icons in the tree and tabs (Ghostty ships the symbols; other terminals need a Nerd Font) |
+| `scan` | `true` | check the whole project when it opens and after saves, for red/yellow file names (see Project scan under Language servers). Takes effect for pyright/basedpyright on `:lsp restart` |
 | `inlayHints.enabled` | `true` | types and parameter names from the language server, drawn in the code. `"inlayHints": false` is short for this |
 | `inlayHints.types` | `true` | variable types: `let x: i32`, Go `range` variables, Python `x: int` |
 | `inlayHints.parameters` | `true` | parameter names at call sites: `add(a: 1, b: 2)` |
@@ -273,7 +410,7 @@ Missing keys use their defaults. Invalid values are reported in the bottom bar, 
 
 Format on save sends `textDocument/formatting` to the file's language server and waits up to 1.5 s for the edits. If there is no server for the file, it doesn't support formatting, or it is still starting, the file is written as-is. On a timeout the file is written unformatted and the bottom bar says so. One `Ctrl+Z` undoes the formatting.
 
-`~/.ren/state` (recent workspaces) and `~/.ren/session/` (`:reload` state and crash-recovery copies of unsaved tabs) are managed by ren.
+`~/.ren/state` (recent workspaces) and `~/.ren/sessions/` (one folder per session: open projects and tabs, copies of unsaved text, and two earlier checkpoints in `1/` and `2/`) are managed by ren.
 
 ## Building a release
 
@@ -301,7 +438,11 @@ src/
   highlight.rs   syntax highlighting
   tree.rs        file tree
   find.rs        find and replace bar, search matcher
-  session.rs     :reload session and crash recovery (~/.ren/session)
+  session.rs     sessions (~/.ren/sessions): autosave, checkpoints, welcome-screen list, --resume, :reload
+  projects.rs    several projects at once: the selector tab, switching, :project
+  scan.rs        project scan: problems in files that aren't open
+  peek.rs        the box that opens when the mouse rests on code
+  comments.rs    Ctrl+/ comment markers per file type
   git.rs         git CLI: status, diffs, partial staging patches, commit messages
   git_ui.rs      git panel, side-by-side diff, commit form, branches, stash
   panel.rs       bottom panel: Terminal / Debug / Containers tabs

@@ -901,7 +901,7 @@ impl Editor {
     }
 
     /// After a checkout or pull: clean tabs reload from disk, vanished files close.
-    fn reload_from_disk(&mut self) {
+    pub(super) fn reload_from_disk(&mut self) {
         for i in 0..self.bufs.len() {
             let b = &self.bufs[i];
             let Some(p) = b.path.clone() else { continue };

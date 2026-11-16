@@ -102,6 +102,11 @@ pub struct Buffer {
     pub hint_req: Option<(&'static str, i64)>,
     /// Time of the last edit, to wait for a pause in typing.
     pub edited_at: Instant,
+    /// Rust: no `mod` reaches this file, so rust-analyzer ignores it.
+    pub unlinked: bool,
+    /// State (`Editor::crate_key`) the crate check last ran for, and the request in flight.
+    pub crate_key: Option<u64>,
+    pub crate_req: Option<(&'static str, i64)>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -131,6 +136,9 @@ impl Buffer {
             hint_rev: None,
             hint_req: None,
             edited_at: Instant::now(),
+            unlinked: false,
+            crate_key: None,
+            crate_req: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
