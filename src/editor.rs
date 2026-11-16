@@ -45,7 +45,9 @@ const FORMAT_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// True when the terminal speaks the kitty keyboard protocol, so Ctrl+Esc and
 /// Ctrl+` arrive as their own keys. Without it Ctrl+Esc is plain Esc, so plain
-/// Esc opens the command line once there is nothing left to close.
+/// Esc opens the command line once there is nothing left to close; and Ctrl+`
+/// sends the same byte as Ctrl+Space (NUL), which then toggles the panel
+/// (completion stays on Ctrl+N).
 pub static KITTY: AtomicBool = AtomicBool::new(false);
 
 pub fn kitty() -> bool {
@@ -917,6 +919,9 @@ impl Editor {
                 self.lsp_code_actions();
             }
             KeyCode::Char('`') => self.toggle_panel(),
+            // Without kitty keys Ctrl+` arrives as Ctrl+Space (both send NUL),
+            // e.g. Windows Terminal under WSL: it's the panel's key then.
+            KeyCode::Char(' ') | KeyCode::Null if !kitty() => self.toggle_panel(),
             KeyCode::Char('w') => {
                 self.enter_edit();
                 self.focus = match self.focus {
@@ -2153,13 +2158,13 @@ impl Editor {
             return;
         }
         match cmd.as_str() {
-            "q" | "quit" | "close" => self.close_buffer(false, true),
-            "q!" | "quit!" => self.close_buffer(true, true),
+            "q" | "quit" | "close" => self.close_buffer(false),
+            "q!" | "quit!" => self.close_buffer(true),
             "qa" | "qall" => self.quit_all(false),
             "qa!" | "qall!" => self.quit_all(true),
             "wq" | "x" | "xit" => {
                 if self.save(None) {
-                    self.close_buffer(false, true);
+                    self.close_buffer(false);
                 }
             }
             "w" | "write" | "save" => match rest.first() {
@@ -2358,21 +2363,20 @@ impl Editor {
         }
     }
 
-    fn close_buffer(&mut self, force: bool, quit_if_last: bool) {
+    /// `:q`, `:q!`, `:wq`, a tab's ×: closes the tab. The last one leaves an
+    /// empty tab (the welcome screen); ren stays open, and only `:qa` quits.
+    fn close_buffer(&mut self, force: bool) {
         if self.buf().dirty && !force && !self.is_scratch_output() {
             return self.error("Unsaved changes (Ctrl+S to save, :q! to discard)");
         }
         self.sel = None;
         if self.bufs.len() == 1 {
-            if quit_if_last {
-                // `:q!` drops this tab's changes, not another project's.
-                if self.parked_saved() {
-                    self.quit = true;
-                }
-            } else {
-                self.lsp_close_buf(0);
-                self.bufs[0] = Buffer::scratch(NONAME);
+            if self.is_pristine(0) {
+                return self.info("Nothing to close (:qa quits ren)");
             }
+            self.lsp_close_buf(0);
+            self.bufs[0] = Buffer::scratch(NONAME);
+            self.mode = Mode::Edit;
             return;
         }
         self.lsp_close_buf(self.cur);
@@ -2409,7 +2413,7 @@ impl Editor {
                 self.buf().name
             ));
         } else {
-            self.close_buffer(false, false);
+            self.close_buffer(false);
         }
     }
 

@@ -39,7 +39,9 @@ EDITING
 TABS AND WINDOWS
   Ctrl+B          show / hide the side panel (file tree, or git with :git)
   Ctrl+W          cycle focus: editor → side panel → bottom panel
-  Ctrl+`          bottom panel: Terminal | Debug | Containers (needs kitty keys; or :panel)
+  Ctrl+`          bottom panel: Terminal | Debug | Containers (or :panel). Without kitty
+                  keys (Windows Terminal, tmux, Terminal.app) Ctrl+` and Ctrl+Space send the
+                  same thing, so Ctrl+Space opens the panel too; completion is then Ctrl+N
   Ctrl+K          open a folder (in place of this project's)
   Ctrl+R          projects: the first tab (the folder's name ▾) lists the open
                   projects, the one on screen ticked (● = unsaved changes), and
@@ -47,11 +49,13 @@ TABS AND WINDOWS
                   tree, language servers, terminals, debugger and git; containers
                   are shared. :project lists them · :project <n> switches ·
                   :project <folder> opens one · :project close closes this one
-  :q  :q!         close the tab (:q! drops unsaved changes; quits on the last tab)
+  :q  :q!         close the tab (:q! drops unsaved changes). The last one leaves the
+                  welcome screen: ren stays open, only :qa quits
   :w  :wq  :x     save / save and close the tab (:w <path> saves as)
   tab ×           hover a tab: its icon turns into ×; click it (or middle-click the
                   tab) to close. Unsaved: opens : for q! (discard) or wq (save)
-  :qa :qa!        quit
+  :qa :qa!        quit ren (:qa! drops unsaved changes). The session is saved: the
+                  welcome screen and ren --resume bring every project and tab back
   :reload         restart ren and come back to the same place (unsaved text is kept)
   sessions        what's open (every project, its tabs, unsaved text) is saved as you
                   work, and at once if the terminal closes. The welcome screen lists
@@ -121,7 +125,7 @@ BOTTOM PANEL (Ctrl+` or :panel; Ctrl+PgUp/PgDn switch tabs while it has focus)
 
 LANGUAGE SERVER (LSP) — starts automatically; the project's .venv / node_modules/.bin
 first, then PATH. Several servers per language via "lsp.servers" in settings.
-  Ctrl+Space   completion (Tab / Enter accepts)
+  Ctrl+Space   completion (Tab / Enter accepts); Ctrl+N without kitty keys
   F1           hover documentation (or the value of a variable while debugging)
   Rest the mouse on code for a second: a box with the problems there (what,
   which tool and rule, a docs link), the type/docs, and quick fixes to click.

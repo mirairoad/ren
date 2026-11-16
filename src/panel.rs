@@ -305,6 +305,9 @@ impl Editor {
                 return true;
             }
             KeyCode::Char('`') if ctrl => return false,
+            // Ctrl+` without kitty keys (it arrives as Ctrl+Space): the panel's
+            // key, not the shell's.
+            KeyCode::Char(' ') | KeyCode::Null if ctrl && !kitty() => return false,
             _ => {}
         }
         match self.panel_tab {
