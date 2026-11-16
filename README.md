@@ -64,7 +64,7 @@ What you have open (every project, its tabs and cursors, and unsaved text) is sa
 - **Navigation** — document symbols, workspace symbol search, references, jump list.
 - **Workspace** — file tree, tabs, folder picker, recent workspaces, per-project `.ren/settings.json`, shell command integration (`:!cargo build`).
 - **System clipboard** — copy, cut and paste are synced with the OS clipboard on Windows, macOS, X11 and Wayland.
-- **Syntax highlighting** for Rust, C/C++, C#, Python, JavaScript/TypeScript, Go, Shell, Lua, SQL, Dockerfiles (`Dockerfile`, `Dockerfile.flyway`, `api.dockerfile`, `Containerfile`), XML (`.csproj` and other MSBuild files, XAML, `.resx`, `.slnx`), Visual Studio solutions (`.sln`), Markdown (code blocks in their own language), TOML/YAML, JSON and Jupyter notebooks (`.ipynb`, as JSON). The language comes from the file name, so it works for any such file in the project.
+- **Syntax highlighting** for Rust, C/C++, C#, Python, JavaScript/TypeScript, Go, Shell, Lua, SQL, Dockerfiles (`Dockerfile`, `Dockerfile.flyway`, `api.dockerfile`, `Containerfile`), XML (`.csproj` and other MSBuild files, XAML, `.resx`, `.slnx`), Visual Studio solutions (`.sln`), Markdown (code blocks in their own language), `.env` files (`.env`, `.env.template`, `.env.local`, …), TOML/YAML, JSON and Jupyter notebooks (`.ipynb`, as JSON). The language comes from the file name, so it works for any such file in the project.
 - **Rendering** — double-buffered, diff-based redraw; only changed rows are written to the terminal. Truecolor with automatic 256-color fallback.
 
 ## Installation

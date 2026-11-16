@@ -46,6 +46,8 @@ pub enum Strs {
     Xml,
     /// Handled by `highlight_md`.
     Markdown,
+    /// `.env` files: handled by `highlight_env`.
+    Env,
 }
 
 // What a string treats as a placeholder.
@@ -916,6 +918,25 @@ static MARKDOWN: LangDef = LangDef {
     directives: false,
 };
 
+/// `.env`, `.env.local`, `.env.template`, `prod.env`: found by name, see
+/// `is_dotenv`. `line_comment` is for comment toggling.
+static DOTENV: LangDef = LangDef {
+    name: "Dotenv",
+    exts: &["env"],
+    keywords: &[],
+    types: &[],
+    line_comment: &["#"],
+    block: None,
+    strs: Strs::Env,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
 static LANGS: &[&LangDef] = &[
     &RUST,
     &C,
@@ -932,6 +953,7 @@ static LANGS: &[&LangDef] = &[
     &XML,
     &SLN,
     &MARKDOWN,
+    &DOTENV,
 ];
 
 /// Every language ren highlights.
@@ -945,7 +967,7 @@ impl LangDef {
         self.block.is_some()
             || matches!(
                 self.strs,
-                Strs::Rust | Strs::Python | Strs::Js | Strs::Go | Strs::Toml | Strs::Sql | Strs::CSharp
+                Strs::Rust | Strs::Python | Strs::Js | Strs::Go | Strs::Toml | Strs::Sql | Strs::CSharp | Strs::Env
             )
     }
 }
@@ -966,10 +988,28 @@ pub fn is_dockerfile(name: &str) -> bool {
         .any(|d| n == *d || n.starts_with(&format!("{}.", d)) || n.ends_with(&format!(".{}", d)))
 }
 
+/// `.env` and its variants (`.env.local`, `.env.template`, `.env.example`,
+/// `.env.production.local`) and `*.env`. A variant ending in a language's own
+/// extension (`.env.json`, `.env.sh`) is that language; `.envrc` is a shell
+/// script.
+pub fn is_dotenv(name: &str) -> bool {
+    let n = name.to_lowercase();
+    if n.ends_with(".env") {
+        return true;
+    }
+    n.strip_prefix(".env.").is_some_and(|rest| {
+        let ext = rest.rsplit('.').next().unwrap_or(rest);
+        !LANGS.iter().any(|l| l.exts.contains(&ext))
+    })
+}
+
 pub fn detect(path: &Path) -> &'static LangDef {
     let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
     if is_dockerfile(&name) {
         return &DOCKERFILE;
+    }
+    if is_dotenv(&name) {
+        return &DOTENV;
     }
     let ext = path
         .extension()
@@ -1130,7 +1170,7 @@ fn string_open(strs: Strs, line: &[char], i: usize) -> Option<(usize, StrState)>
                 _ => None,
             }
         }
-        Strs::Xml | Strs::Markdown => None,
+        Strs::Xml | Strs::Markdown | Strs::Env => None,
     }
 }
 
@@ -1868,6 +1908,121 @@ fn scan_string(line: &[char], mut i: usize, s: StrState, out: &mut [Tok], st: &m
     n
 }
 
+/// `.env`: `KEY=value` (also `KEY: value`) with keys as types, `export` as a
+/// keyword and `#` comments. Values: `"…"` with escapes and `$VAR`/`${VAR}`,
+/// `'…'` and `` `…` `` as written, all three able to run over lines; a bare
+/// value is a string up to ` #`, or a number or `true`/`false` when that is
+/// all it is. `st` carries an open quoted value to the next line.
+fn highlight_env(line: &[char], st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    let skip_ws = |mut i: usize| {
+        while i < n && line[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    if let State::Str(s) = *st {
+        let i = scan_string(line, 0, s, out, st);
+        env_comment(line, i, out);
+        return;
+    }
+    *st = State::Code;
+    let mut i = skip_ws(0);
+    if i >= n {
+        return;
+    }
+    if line[i] == '#' {
+        out[i..].fill(Tok::Comment);
+        return;
+    }
+    let export = starts_with(line, i, "export") && line.get(i + 6).is_some_and(|c| c.is_whitespace());
+    if export {
+        out[i..i + 6].fill(Tok::Keyword);
+        i = skip_ws(i + 6);
+    }
+    let key = i;
+    while i < n && (line[i].is_alphanumeric() || matches!(line[i], '_' | '.' | '-')) {
+        i += 1;
+    }
+    let key_end = i;
+    i = skip_ws(i);
+    let assign = match line.get(i) {
+        Some('=') => true,
+        Some(':') => line.get(i + 1).is_none_or(|c| c.is_whitespace()),
+        _ => false,
+    };
+    if key_end == key || !assign {
+        // `export NAME` (no value) still names a variable.
+        if export && key_end > key && i >= n {
+            out[key..key_end].fill(Tok::Type);
+        }
+        return;
+    }
+    out[key..key_end].fill(Tok::Type);
+    i = skip_ws(i + 1);
+    let quoted = |q, esc, fmt| StrState {
+        quote: q,
+        triple: false,
+        hashes: 0,
+        esc,
+        fmt,
+        multi: true,
+    };
+    let s = match line.get(i) {
+        Some('"') => Some(quoted('"', Esc::Yes, FMT_SHELL)),
+        Some(&q @ ('\'' | '`')) => Some(quoted(q, Esc::No, 0)),
+        _ => None,
+    };
+    if let Some(s) = s {
+        out[i] = Tok::Quote;
+        *st = State::Str(s);
+        let e = scan_string(line, i + 1, s, out, st);
+        env_comment(line, e, out);
+        return;
+    }
+    // A bare value ends at whitespace followed by `#`.
+    let start = i;
+    let mut end = (start + 1..n)
+        .find(|&j| line[j] == '#' && line[j - 1].is_whitespace())
+        .unwrap_or(n);
+    out[end..].fill(Tok::Comment);
+    while end > start && line[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    let value: String = line[start..end].iter().collect();
+    // `3000`, `-1`, `0.5`, `1_000`, `1e6` (not `127.0.0.1`, nor `inf`).
+    let digits = value.strip_prefix(['-', '+']).unwrap_or(&value);
+    let number = digits.starts_with(|c: char| c.is_ascii_digit()) && digits.replace('_', "").parse::<f64>().is_ok();
+    if number {
+        out[start..end].fill(Tok::Number);
+    } else if matches!(value.to_ascii_lowercase().as_str(), "true" | "false") {
+        out[start..end].fill(Tok::Keyword);
+    } else {
+        let mut j = start;
+        while j < end {
+            if line[j] == '$' {
+                if let Some(e) = shell_var(line, j).filter(|&e| e <= end) {
+                    out[j..e].fill(Tok::Interp);
+                    j = e;
+                    continue;
+                }
+            }
+            out[j] = Tok::Str;
+            j += 1;
+        }
+    }
+}
+
+/// After a closed quoted value: a `#` comment (after whitespace) to the end of the line.
+fn env_comment(line: &[char], from: usize, out: &mut [Tok]) {
+    if let Some(p) = line[from.min(line.len())..].iter().position(|c| !c.is_whitespace()) {
+        let j = from + p;
+        if line[j] == '#' && (j == 0 || line[j - 1].is_whitespace()) {
+            out[j..].fill(Tok::Comment);
+        }
+    }
+}
+
 pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok> {
     let n = line.len();
     let mut out = vec![Tok::Normal; n];
@@ -1880,6 +2035,10 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
     }
     if lang.strs == Strs::Markdown {
         highlight_md(line, st, &mut out);
+        return out;
+    }
+    if lang.strs == Strs::Env {
+        highlight_env(line, st, &mut out);
         return out;
     }
     let mut i = 0;
@@ -2166,9 +2325,47 @@ mod tests {
             ("App.sln", "Solution"),
             ("App.slnx", "XML"),
             ("analysis.ipynb", "JSON"),
+            (".env", "Dotenv"),
+            (".env.template", "Dotenv"),
+            (".env.local", "Dotenv"),
+            (".env.example", "Dotenv"),
+            (".env.production.local", "Dotenv"),
+            ("prod.env", "Dotenv"),
+            (".env.json", "JSON"),
+            (".envrc", "Metin"),
         ] {
             assert_eq!(detect(Path::new(f)).name, lang, "{}", f);
         }
+    }
+
+    #[test]
+    fn dotenv_lines() {
+        let k = |s: &str| kinds(&hl(&DOTENV, s));
+        assert_eq!(k("# comment"), "ccccccccc");
+        assert_eq!(
+            k("export API_KEY=\"abc $HOME\\n\" # note"),
+            "kkkkkk.ttttttt.qssssiiiiieeq.cccccc"
+        );
+        assert_eq!(k("PORT=3000"), "tttt.nnnn");
+        assert_eq!(k("DEBUG=true # on"), "ttttt.kkkk.cccc");
+        // `#` only starts a comment after whitespace.
+        assert_eq!(k("URL=http://x/#a ${HOST}:8080"), "ttt.ssssssssssssiiiiiiisssss");
+        assert_eq!(k("NAME='it $x'"), "tttt.qsssssq");
+        assert_eq!(k("HOST=127.0.0.1"), "tttt.sssssssss");
+        assert_eq!(k("KEY: value"), "ttt..sssss");
+        assert_eq!(k("  A=1"), "..t.n");
+        assert_eq!(k("export PATH"), "kkkkkk.tttt");
+        assert_eq!(k("just text"), ".........");
+        // Quoted values go on over lines.
+        let mut st = State::default();
+        let a: Vec<char> = "CERT=\"-----BEGIN".chars().collect();
+        highlight_line(&DOTENV, &a, &mut st);
+        assert!(matches!(st, State::Str(_)));
+        let b: Vec<char> = "abc\" # end".chars().collect();
+        assert_eq!(kinds(&highlight_line(&DOTENV, &b, &mut st)), "sssq.ccccc");
+        assert_eq!(st, State::Code);
+        assert_eq!(fence_lang("env").map(|i| LANGS[i].name), Some("Dotenv"));
+        assert_eq!(fence_lang("dotenv").map(|i| LANGS[i].name), Some("Dotenv"));
     }
 
     #[test]
