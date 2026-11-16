@@ -74,7 +74,7 @@ fn by_name(name: &str) -> Option<CommentStyle> {
             | ".zshrc"
             | ".profile"
     ) || name.starts_with(".env")
-        || name.starts_with("dockerfile.");
+        || crate::highlight::is_dockerfile(name);
     if hash {
         return Some(HASH);
     }
@@ -97,7 +97,7 @@ fn by_ext(ext: &str) -> Option<CommentStyle> {
         "py" | "pyw" | "pyi" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "r" | "nix" | "ex" | "exs"
         | "yaml" | "yml" | "toml" | "conf" | "cfg" | "properties" | "mk" | "cmake" | "dockerfile" | "cr" | "coffee"
         | "nim" | "graphql" | "gql" | "tcl" | "ps1" | "psm1" | "jl" | "awk" | "sed" | "gitignore" | "env"
-        | "service" | "desktop" | "tsv" => HASH,
+        | "service" | "desktop" | "tsv" | "sln" => HASH,
         "ini" | "reg" => style(&[";", "#"], None),
         "lua" => style(&["--"], Some(("--[[", "]]"))),
         "sql" => style(&["--"], Some(("/*", "*/"))),
@@ -111,7 +111,7 @@ fn by_ext(ext: &str) -> Option<CommentStyle> {
         "css" => CSS,
         "html" | "htm" | "xhtml" | "xml" | "svg" | "xsl" | "xslt" | "xaml" | "plist" | "md" | "markdown" | "vue"
         | "svelte" | "astro" | "csproj" | "fsproj" | "vbproj" | "props" | "targets" | "jsp" | "erb" | "hbs"
-        | "handlebars" | "njk" => MARKUP,
+        | "handlebars" | "njk" | "slnx" | "axaml" | "resx" | "nuspec" | "config" | "xsd" => MARKUP,
         // JSON has no comments.
         "json" => style(&[], None),
         _ => return None,
@@ -134,6 +134,12 @@ mod tests {
         assert_eq!(of("app.py").line, &["#"]);
         assert_eq!(of("q.sql").line, &["--"]);
         assert_eq!(of("Dockerfile").line, &["#"]);
+        assert_eq!(of("Dockerfile.flyway").line, &["#"]);
+        assert_eq!(of("db.Containerfile").line, &["#"]);
+        assert_eq!(of("App.sln").line, &["#"]);
+        assert_eq!(of("Program.cs").line, &["//"]);
+        assert_eq!(of("App.csproj").block, Some(("<!--", "-->")));
+        assert!(of("nb.ipynb").line.is_empty() && of("nb.ipynb").block.is_none());
         assert_eq!(of(".env.local").line, &["#"]);
         // YAML used to borrow the TOML/INI markers (`#` and `;`).
         assert_eq!(of("ci.yml").line, &["#"]);

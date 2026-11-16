@@ -63,7 +63,7 @@ What you have open (every project, its tabs and cursors, and unsaved text) is sa
 - **Navigation** — document symbols, workspace symbol search, references, jump list.
 - **Workspace** — file tree, tabs, folder picker, recent workspaces, per-project `.ren/settings.json`, shell command integration (`:!cargo build`).
 - **System clipboard** — copy, cut and paste are synced with the OS clipboard on Windows, macOS, X11 and Wayland.
-- **Syntax highlighting** for Rust, C/C++, Python, JavaScript/TypeScript, Go, Shell, Lua, TOML/YAML and JSON.
+- **Syntax highlighting** for Rust, C/C++, C#, Python, JavaScript/TypeScript, Go, Shell, Lua, SQL, Dockerfiles (`Dockerfile`, `Dockerfile.flyway`, `api.dockerfile`, `Containerfile`), XML (`.csproj` and other MSBuild files, XAML, `.resx`, `.slnx`), Visual Studio solutions (`.sln`), TOML/YAML, JSON and Jupyter notebooks (`.ipynb`, as JSON). The language comes from the file name, so it works for any such file in the project.
 - **Rendering** — double-buffered, diff-based redraw; only changed rows are written to the terminal. Truecolor with automatic 256-color fallback.
 
 ## Installation
@@ -324,6 +324,9 @@ ren looks for these servers in the project first (`.venv/bin`, `venv/bin`, `node
 | Go | `gopls` |
 | Lua | `lua-language-server` |
 | Shell | `bash-language-server` |
+| C# | `csharp-ls`, `OmniSharp -lsp` |
+| Dockerfile | `docker-langserver --stdio` |
+| SQL | `sqls`, `sql-language-server` |
 
 **Inlay hints** are asked for once typing pauses, and move with your edits until the server answers again. rust-analyzer, gopls, clangd and basedpyright send them; ren turns on gopls's and TypeScript's (both off by default), and rust-analyzer's closure return types. pyright, the first Python server in the list, has none, but basedpyright does. Each kind (types, parameter names, return types, chain types, closing braces) can be switched off in `inlayHints` (see Configuration). `:hints` opens a checkbox menu to switch them for the session, and `:hints types` / `:hints off` do it from the command line.
 
@@ -337,6 +340,7 @@ ren looks for these servers in the project first (`.venv/bin`, `venv/bin`, `node
 | Go (`go.mod`) | starts gopls, which checks every package |
 | Python (`pyproject.toml`, `setup.py`, …) | starts pyright/basedpyright in workspace mode (every file, live); runs `ruff check` when ruff is one of the Python servers |
 | TypeScript (`tsconfig.json`) | runs `tsc --noEmit` (incremental) when `tsc` is in `node_modules/.bin` or on `PATH` |
+| C# (a `.sln`, `.slnx` or `.csproj` at the root) | runs `dotnet build` on the folder's solution (or its one project) when `dotnet` is on `PATH`; it restores packages and writes `bin/` and `obj/` as any build does |
 
 It doesn't slow ren down: the servers and checkers are separate programs and ren only reads their results. The command-line checkers (ruff, tsc) run again after a save of a file of their language (or of `pyproject.toml`, `tsconfig.json`, …), in the background, one at a time, at low priority (`nice`), and a rerun waits at least as long as the last run took, so a slow `tsc` on a big project gets at most half the CPU time. They don't run while you type: they read the saved files, and the open file's problems already come live from its server. An open file shows its server's view; the checkers' results count for files no server watches. `:scan` checks again now (e.g. after a `git pull`), and `"scan": false` turns it off for big projects (a project's `.ren/settings.json` can do it for just that one).
 
@@ -344,7 +348,9 @@ One server runs for every project of a language: opening a file from another pro
 
 By default one server runs per language: the first one found, in the order listed. To run several at once, list them in `lsp.servers` (see Configuration): diagnostics and code actions are merged, formatting goes to the `lsp.format` server, and hover/definition/completion go to the first server that supports them. Diagnostics show their source and rule code, e.g. `` `os` imported but unused [Ruff F401] ``.
 
-The workspace root is resolved from project markers (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`, `compile_commands.json`, `.git`). When no server is available, completion falls back to words from open buffers.
+The workspace root is resolved from project markers (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`, `compile_commands.json`, a `.sln` or `.csproj` for C#, `.git`). When no server is available, completion falls back to words from open buffers.
+
+Some servers (csharp-ls) give diagnostics only when asked, instead of sending them: ren asks for the open file's once typing pauses, and again when the server says they changed.
 
 Set `REN_LSP_LOG=<file>` to log all JSON-RPC traffic.
 

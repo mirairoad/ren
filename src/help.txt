@@ -129,7 +129,7 @@ first, then PATH. Several servers per language via "lsp.servers" in settings.
   F8 / Shift+F8  next / previous diagnostic
   Red file names (tabs and tree) have errors, yellow ones only warnings;
   a folder shows the worst of what's inside it. A second after a folder opens
-  the whole project is checked (Rust, Go, Python, TypeScript), and again after
+  the whole project is checked (Rust, Go, Python, TypeScript, C#), and again after
   saves, in the background. :scan checks again now; "scan": false turns it off.
   Inlay hints: types and parameter names in dim italics (not part of the file).
   :format :diag :actions :def :refs :symbols :wsymbols :hover :rename <name>

@@ -55,6 +55,15 @@ What's left after the wish-list rebuild (CHANGES.md, Log 2026-11-11). Ordered ro
 - [ ] *(suggested)* Show what a checkpoint had that the latest state doesn't (closed files, another project) in the `:session` list.
 - [ ] *(suggested)* Restore the last session automatically when ren starts in the same folder (VS Code does), with a setting to turn it off.
 
+## SQL, Dockerfile, C#, XML
+- [ ] SQL: a table name right before `(` (`CREATE TABLE users (`) is coloured as a function call.
+- [ ] Dockerfile: a continuation line (after `\`) that starts with an instruction's name colours it as one.
+- [ ] C#: `""` inside a verbatim string `@"…"` ends and restarts it (same colours, but a verbatim string over several lines is cut there).
+- [ ] XML has no language server: `lemminx` could be added for `.csproj` and friends. HTML isn't highlighted (the XML highlighter would trip over `<script>` contents).
+- [ ] `dotnet build` needs exactly one solution (or one project) at the root; it doesn't look in subfolders.
+- [ ] csharp-ls's latest release needs a newer .NET SDK than 8.0 (0.15 works with 8.0).
+- [ ] *(suggested)* A notebook view for `.ipynb`: the cells as Python (or the notebook's language) instead of the raw JSON.
+
 ## Comments
 - [ ] Ctrl+/ in Vue/Svelte/Astro: switch to `//` inside `<script>` and `/* */` inside `<style>` (today `<!-- -->` everywhere).
 

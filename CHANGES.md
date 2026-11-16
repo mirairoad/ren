@@ -212,6 +212,20 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-16: SQL, Dockerfile, C#, XML, .sln and notebooks
+- **Highlighting for six more kinds of file**, by file name, so any such file in the project gets it:
+  - **SQL** (`.sql`, `.pgsql`, `.ddl`): keywords and types in any case (SQL is often all capitals, so capitals don't mean types here), `--` and `/* */` comments, `'…'` strings over several lines, `"Quoted"` and `` `quoted` `` names left alone, parameters `@p`, `@@version`, `$1`, `:name` (not a `::type` cast).
+  - **Dockerfiles**: `Dockerfile`, `Dockerfile.flyway`, `Dockerfile.dev`, `api.dockerfile`, `Containerfile` (not `Dockerfile.dockerignore`). Instructions only count as the line's first word (after `ONBUILD`), so `from` in a `RUN` line stays a word; `AS` in `FROM … AS stage`; `$VAR` and `${VAR}`; shell strings.
+  - **C#** (`.cs`, `.csx`): `$"…{x}…"` interpolation with `{{ }}`, verbatim `@"…"`, raw `"""…"""` over several lines, `#region`/`#if` directives.
+  - **XML**, a new kind of highlighter (markup, not code): tag names, attribute names, values, entities (`&amp;`), comments and tags over several lines, `<?xml ?>`. MSBuild's `$(Prop)`, `@(Items)`, `%(Meta)` are marked. For `.xml`, `.csproj`/`.fsproj`/`.vbproj`, `.props`, `.targets`, `.slnx`, `.xaml`, `.axaml`, `.resx`, `.nuspec`, `.config`, `.xsd`, `.xsl`, `.svg`, `.plist`.
+  - **Visual Studio solutions** (`.sln`): `Project`/`EndProject`/`GlobalSection`… as keywords, strings with backslash paths as they are, `#` comments.
+  - **Jupyter notebooks** (`.ipynb`) as JSON.
+- Icons for C#, solutions and project files, XML, notebooks and every Dockerfile name; `Ctrl+/` markers for `.sln` (`#`), `.slnx`/`.resx`/`.nuspec`/`.config` (`<!-- -->`) and every Dockerfile name.
+- **Language servers**: C# (`csharp-ls`, then `OmniSharp -lsp`), Dockerfile (`docker-langserver --stdio`), SQL (`sqls`, then `sql-language-server`). C#'s root is the folder with a `.sln`, `.slnx` or `.csproj`: root markers can now be `*.ext`.
+- **Pull diagnostics**: csharp-ls gives diagnostics only when asked (`textDocument/diagnostic`), so ren asks for the open file's once typing pauses, and again on `workspace/diagnostic/refresh`. Only servers that offer it and haven't sent any diagnostics by themselves are asked, so rust-analyzer, pyright and the rest work as before.
+- **Project scan for C#**: with a `.sln`/`.slnx` (else one `.csproj`) at the root and `dotnet` on `PATH`, `dotnet build` runs a second after the folder opens and after saves of `.cs`, project and solution files, like ruff and tsc; its `File.cs(3,7): error CS0103: …` lines are tsc's shape. Several solutions (or several projects and no solution) at the root: no build, as `dotnet build` wouldn't pick either.
+- Tested in tmux on a `dotnet new console` project: the tree showed `Program.cs` red (an error) and `Other.cs` yellow (warnings) from `dotnet build`; every new file type opened with the expected colours; csharp-ls 0.15 (in a temporary tool folder) found the solution through the `*.sln` marker, sent inlay hints, and its pulled diagnostics showed in `:diag` and the gutter, and updated after an edit. Unit tests for each highlighter, file-name detection, the build output and target choice, icons and comment markers; 62 pass.
+
 ### 2026-11-16: First release, 0.4.0
 - **`v0.4.0` is ren's first release**, with prebuilt binaries for Linux x86_64, macOS arm64 and macOS x86_64, so `install.sh` downloads one and nobody needs cargo. The version moves on from zetsu's 0.3.0, which the fork started from.
 - README: the "no releases yet" note is gone; the installer section says it downloads a binary; downloading by hand needs `chmod +x`, and on macOS `xattr -d com.apple.quarantine` for a browser download (ren isn't notarized; `curl` doesn't quarantine).

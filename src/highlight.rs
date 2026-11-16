@@ -31,6 +31,14 @@ pub enum Strs {
     Toml,
     Json,
     Lua,
+    /// `'…'` (multi-line, `''` inside); `"…"` and `` `…` `` are names, not strings.
+    Sql,
+    /// `"…"`, `$"…{x}…"`, `@"…"`, `"""…"""`, `'c'`.
+    CSharp,
+    /// `"…"` with backslashes as they are (Visual Studio solutions).
+    Sln,
+    /// Markup: handled by `highlight_xml`.
+    Xml,
 }
 
 // What a string treats as a placeholder.
@@ -75,6 +83,8 @@ pub enum State {
     Code,
     Block,
     Str(StrState),
+    /// XML: inside a tag (`<a b="c"` before its `>`).
+    Tag,
 }
 
 pub struct LangDef {
@@ -88,6 +98,14 @@ pub struct LangDef {
     pub macros: bool,
     pub caps_types: bool,
     pub plain: bool,
+    /// Keywords and types match in any case (lists in lower case): SQL, Dockerfile.
+    pub ci: bool,
+    /// Keywords only as the first word of a line (Dockerfile instructions).
+    pub lead: bool,
+    /// `$name` and `${…}` outside strings are variables.
+    pub vars: bool,
+    /// `#word` at the start of a line is a directive (`#region`, `#if`).
+    pub directives: bool,
 }
 
 static PLAIN: LangDef = LangDef {
@@ -101,6 +119,10 @@ static PLAIN: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: true,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static RUST: LangDef = LangDef {
@@ -121,6 +143,10 @@ static RUST: LangDef = LangDef {
     macros: true,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static C: LangDef = LangDef {
@@ -191,6 +217,10 @@ static C: LangDef = LangDef {
     macros: false,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static PYTHON: LangDef = LangDef {
@@ -210,6 +240,10 @@ static PYTHON: LangDef = LangDef {
     macros: false,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static JS: LangDef = LangDef {
@@ -276,6 +310,10 @@ static JS: LangDef = LangDef {
     macros: false,
     caps_types: true,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static GO: LangDef = LangDef {
@@ -321,6 +359,10 @@ static GO: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static SHELL: LangDef = LangDef {
@@ -337,6 +379,10 @@ static SHELL: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static TOML: LangDef = LangDef {
@@ -350,11 +396,16 @@ static TOML: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static JSON: LangDef = LangDef {
     name: "JSON",
-    exts: &["json", "jsonc"],
+    // Jupyter notebooks are JSON.
+    exts: &["json", "jsonc", "ipynb"],
     keywords: &["true", "false", "null"],
     types: &[],
     line_comment: &[],
@@ -363,6 +414,10 @@ static JSON: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
 static LUA: LangDef = LangDef {
@@ -379,14 +434,447 @@ static LUA: LangDef = LangDef {
     macros: false,
     caps_types: false,
     plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
 };
 
-static LANGS: &[&LangDef] = &[&RUST, &C, &PYTHON, &JS, &GO, &SHELL, &TOML, &JSON, &LUA];
+static SQL: LangDef = LangDef {
+    name: "SQL",
+    exts: &["sql", "pgsql", "ddl"],
+    keywords: &[
+        "add",
+        "all",
+        "alter",
+        "always",
+        "analyze",
+        "and",
+        "any",
+        "as",
+        "asc",
+        "begin",
+        "between",
+        "by",
+        "cascade",
+        "case",
+        "check",
+        "collate",
+        "column",
+        "commit",
+        "conflict",
+        "constraint",
+        "create",
+        "cross",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "database",
+        "declare",
+        "default",
+        "delete",
+        "desc",
+        "distinct",
+        "do",
+        "drop",
+        "else",
+        "end",
+        "except",
+        "exec",
+        "execute",
+        "exists",
+        "explain",
+        "extension",
+        "false",
+        "fetch",
+        "first",
+        "for",
+        "foreign",
+        "from",
+        "full",
+        "function",
+        "generated",
+        "go",
+        "grant",
+        "group",
+        "having",
+        "identity",
+        "if",
+        "ilike",
+        "in",
+        "index",
+        "inner",
+        "insert",
+        "intersect",
+        "into",
+        "is",
+        "join",
+        "key",
+        "language",
+        "last",
+        "lateral",
+        "left",
+        "like",
+        "limit",
+        "materialized",
+        "merge",
+        "natural",
+        "next",
+        "not",
+        "nothing",
+        "null",
+        "nulls",
+        "of",
+        "offset",
+        "on",
+        "only",
+        "or",
+        "order",
+        "outer",
+        "over",
+        "partition",
+        "primary",
+        "procedure",
+        "recursive",
+        "references",
+        "rename",
+        "replace",
+        "restrict",
+        "return",
+        "returning",
+        "returns",
+        "revoke",
+        "right",
+        "rollback",
+        "row",
+        "rows",
+        "schema",
+        "select",
+        "sequence",
+        "set",
+        "table",
+        "temp",
+        "temporary",
+        "then",
+        "to",
+        "top",
+        "transaction",
+        "trigger",
+        "true",
+        "truncate",
+        "type",
+        "union",
+        "unique",
+        "update",
+        "using",
+        "vacuum",
+        "values",
+        "view",
+        "when",
+        "where",
+        "window",
+        "with",
+        "without",
+    ],
+    types: &[
+        "bigint",
+        "bigserial",
+        "binary",
+        "bit",
+        "blob",
+        "bool",
+        "boolean",
+        "bytea",
+        "char",
+        "character",
+        "cidr",
+        "clob",
+        "date",
+        "datetime",
+        "datetime2",
+        "datetimeoffset",
+        "decimal",
+        "double",
+        "enum",
+        "float",
+        "inet",
+        "int",
+        "int2",
+        "int4",
+        "int8",
+        "integer",
+        "interval",
+        "json",
+        "jsonb",
+        "money",
+        "nchar",
+        "ntext",
+        "numeric",
+        "nvarchar",
+        "precision",
+        "real",
+        "serial",
+        "smallint",
+        "smallserial",
+        "text",
+        "time",
+        "timestamp",
+        "timestamptz",
+        "timetz",
+        "tinyint",
+        "uniqueidentifier",
+        "uuid",
+        "varbinary",
+        "varchar",
+        "xml",
+    ],
+    line_comment: &["--"],
+    block: Some(("/*", "*/")),
+    strs: Strs::Sql,
+    macros: false,
+    // SQL is often written in capitals: they say nothing about types.
+    caps_types: false,
+    plain: false,
+    ci: true,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+/// Found by file name (`Dockerfile`, `Dockerfile.flyway`, `app.dockerfile`,
+/// `Containerfile`), see `detect`.
+static DOCKERFILE: LangDef = LangDef {
+    name: "Dockerfile",
+    exts: &["dockerfile", "containerfile"],
+    keywords: &[
+        "add",
+        "arg",
+        "as",
+        "cmd",
+        "copy",
+        "entrypoint",
+        "env",
+        "expose",
+        "from",
+        "healthcheck",
+        "label",
+        "maintainer",
+        "onbuild",
+        "run",
+        "shell",
+        "stopsignal",
+        "user",
+        "volume",
+        "workdir",
+    ],
+    types: &[],
+    line_comment: &["#"],
+    block: None,
+    strs: Strs::Shell,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: true,
+    lead: true,
+    vars: true,
+    directives: false,
+};
+
+static CSHARP: LangDef = LangDef {
+    name: "C#",
+    exts: &["cs", "csx"],
+    keywords: &[
+        "abstract",
+        "add",
+        "alias",
+        "and",
+        "as",
+        "async",
+        "await",
+        "base",
+        "break",
+        "case",
+        "catch",
+        "checked",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "delegate",
+        "do",
+        "else",
+        "enum",
+        "event",
+        "explicit",
+        "extern",
+        "false",
+        "file",
+        "finally",
+        "fixed",
+        "for",
+        "foreach",
+        "get",
+        "global",
+        "goto",
+        "if",
+        "implicit",
+        "in",
+        "init",
+        "interface",
+        "internal",
+        "is",
+        "lock",
+        "nameof",
+        "namespace",
+        "new",
+        "not",
+        "null",
+        "operator",
+        "or",
+        "out",
+        "override",
+        "params",
+        "partial",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "record",
+        "ref",
+        "remove",
+        "required",
+        "return",
+        "scoped",
+        "sealed",
+        "set",
+        "sizeof",
+        "stackalloc",
+        "static",
+        "struct",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typeof",
+        "unchecked",
+        "unsafe",
+        "using",
+        "value",
+        "var",
+        "virtual",
+        "volatile",
+        "when",
+        "where",
+        "while",
+        "with",
+        "yield",
+        "from",
+        "select",
+        "orderby",
+        "group",
+        "into",
+        "join",
+        "let",
+        "on",
+        "equals",
+        "by",
+        "ascending",
+        "descending",
+    ],
+    types: &[
+        "bool", "byte", "char", "decimal", "double", "dynamic", "float", "int", "long", "nint", "nuint", "object",
+        "sbyte", "short", "string", "uint", "ulong", "ushort", "void",
+    ],
+    line_comment: &["//"],
+    block: Some(("/*", "*/")),
+    strs: Strs::CSharp,
+    macros: false,
+    caps_types: true,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: true,
+};
+
+/// XML and the .NET files written in it (projects, MSBuild, XAML, resources).
+static XML: LangDef = LangDef {
+    name: "XML",
+    exts: &[
+        "xml", "csproj", "fsproj", "vbproj", "props", "targets", "slnx", "xaml", "axaml", "resx", "nuspec", "config",
+        "xsd", "xsl", "xslt", "svg", "plist",
+    ],
+    keywords: &[],
+    types: &[],
+    line_comment: &[],
+    block: Some(("<!--", "-->")),
+    strs: Strs::Xml,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+/// Visual Studio solutions (`.sln`).
+static SLN: LangDef = LangDef {
+    name: "Solution",
+    exts: &["sln"],
+    keywords: &[
+        "Project",
+        "EndProject",
+        "ProjectSection",
+        "EndProjectSection",
+        "Global",
+        "EndGlobal",
+        "GlobalSection",
+        "EndGlobalSection",
+        "preSolution",
+        "postSolution",
+        "preProject",
+        "postProject",
+    ],
+    types: &[],
+    line_comment: &["#"],
+    block: None,
+    strs: Strs::Sln,
+    macros: false,
+    caps_types: false,
+    plain: false,
+    ci: false,
+    lead: false,
+    vars: false,
+    directives: false,
+};
+
+static LANGS: &[&LangDef] = &[
+    &RUST,
+    &C,
+    &PYTHON,
+    &JS,
+    &GO,
+    &SHELL,
+    &TOML,
+    &JSON,
+    &LUA,
+    &SQL,
+    &DOCKERFILE,
+    &CSHARP,
+    &XML,
+    &SLN,
+];
 
 impl LangDef {
     /// Whether a line's colours can depend on the lines above it.
     pub fn multiline(&self) -> bool {
-        self.block.is_some() || matches!(self.strs, Strs::Rust | Strs::Python | Strs::Js | Strs::Go | Strs::Toml)
+        self.block.is_some()
+            || matches!(
+                self.strs,
+                Strs::Rust | Strs::Python | Strs::Js | Strs::Go | Strs::Toml | Strs::Sql | Strs::CSharp
+            )
     }
 }
 
@@ -394,7 +882,23 @@ pub fn plain() -> &'static LangDef {
     &PLAIN
 }
 
+/// `Dockerfile`, `Dockerfile.flyway`, `Dockerfile.dev`, `app.dockerfile`,
+/// `Containerfile` (not their `.dockerignore` files).
+pub fn is_dockerfile(name: &str) -> bool {
+    let n = name.to_lowercase();
+    if n.ends_with(".dockerignore") {
+        return false;
+    }
+    ["dockerfile", "containerfile"]
+        .iter()
+        .any(|d| n == *d || n.starts_with(&format!("{}.", d)) || n.ends_with(&format!(".{}", d)))
+}
+
 pub fn detect(path: &Path) -> &'static LangDef {
+    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    if is_dockerfile(&name) {
+        return &DOCKERFILE;
+    }
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -526,6 +1030,225 @@ fn string_open(strs: Strs, line: &[char], i: usize) -> Option<(usize, StrState)>
             Some((1, s(q, esc, 0, false)))
         }
         Strs::Json => (at(0)? == '"').then(|| (1, s('"', Esc::Yes, 0, false))),
+        Strs::Sql => (at(0)? == '\'').then(|| (1, s('\'', Esc::No, 0, true))),
+        Strs::Sln => (at(0)? == '"').then(|| (1, s('"', Esc::No, 0, false))),
+        Strs::CSharp => {
+            // Prefixes `$` (interpolated) and `@` (verbatim), in either order.
+            let (mut k, mut interp, mut verbatim) = (0, false, false);
+            while k < 3 {
+                match at(k) {
+                    Some('$') => interp = true,
+                    Some('@') => verbatim = true,
+                    _ => break,
+                }
+                k += 1;
+            }
+            let fmt = if interp { FMT_EXPR } else { 0 };
+            match at(k)? {
+                '"' if at(k + 1) == Some('"') && at(k + 2) == Some('"') => Some((
+                    k + 3,
+                    StrState {
+                        triple: true,
+                        ..s('"', Esc::No, fmt, true)
+                    },
+                )),
+                '"' if verbatim => Some((k + 1, s('"', Esc::No, fmt, true))),
+                '"' => Some((k + 1, s('"', Esc::Yes, fmt, false))),
+                '\'' if k == 0 => Some((1, s('\'', Esc::Yes, 0, false))),
+                _ => None,
+            }
+        }
+        Strs::Xml => None,
+    }
+}
+
+/// Dockerfile: an instruction is the line's first word (after `ONBUILD`),
+/// and `AS` names a `FROM` stage.
+fn at_lead(line: &[char], start: usize, word: &str) -> bool {
+    let before: String = line[..start].iter().collect();
+    let before = before.trim();
+    before.is_empty()
+        || before.eq_ignore_ascii_case("onbuild")
+        || (word == "as"
+            && before
+                .split_whitespace()
+                .next()
+                .is_some_and(|f| f.eq_ignore_ascii_case("from")))
+}
+
+/// `$name`, `${name:-x}`: end (exclusive) of the variable at `line[i] == '$'`.
+fn shell_var(line: &[char], i: usize) -> Option<usize> {
+    match line.get(i + 1)? {
+        '{' => balanced(line, i + 1, '{', '}', '\0'),
+        c if c.is_alphabetic() || *c == '_' => {
+            let mut e = i + 1;
+            while e < line.len() && (line[e].is_alphanumeric() || line[e] == '_') {
+                e += 1;
+            }
+            Some(e)
+        }
+        _ => None,
+    }
+}
+
+/// SQL parameters and variables: `@name`, `@@version`, `$1`, `:name` (not a
+/// `::type` cast). End (exclusive), at `i`.
+fn sql_param(line: &[char], i: usize) -> Option<usize> {
+    let c = line[i];
+    let next = *line.get(i + 1)?;
+    let word_end = |from: usize| {
+        let mut e = from;
+        while e < line.len() && (line[e].is_alphanumeric() || line[e] == '_') {
+            e += 1;
+        }
+        e
+    };
+    match c {
+        '@' if next == '@' && line.get(i + 2).is_some_and(|c| c.is_alphabetic()) => Some(word_end(i + 2)),
+        '@' if next.is_alphabetic() || next == '_' => Some(word_end(i + 1)),
+        '$' if next.is_ascii_digit() => Some(word_end(i + 1)),
+        ':' if (next.is_alphabetic() || next == '_') && (i == 0 || line[i - 1] != ':') => Some(word_end(i + 1)),
+        _ => None,
+    }
+}
+
+fn xml_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
+}
+
+/// `&amp;` `&#10;` `&#x1F;`: end (exclusive) of the entity at `line[i] == '&'`.
+fn xml_entity(line: &[char], i: usize) -> Option<usize> {
+    for (j, &c) in line.iter().enumerate().skip(i + 1).take(12) {
+        if c == ';' {
+            return (j > i + 1).then_some(j + 1);
+        }
+        if !(c.is_alphanumeric() || c == '#') {
+            return None;
+        }
+    }
+    None
+}
+
+/// MSBuild `$(Property)`, `@(Items)`, `%(Metadata)`: end (exclusive).
+fn msbuild_ref(line: &[char], i: usize) -> Option<usize> {
+    if matches!(line[i], '$' | '@' | '%') && line.get(i + 1) == Some(&'(') {
+        balanced(line, i + 1, '(', ')', '\0')
+    } else {
+        None
+    }
+}
+
+/// XML: tag names as keywords, attribute names as types, values as strings
+/// (entities and MSBuild `$(…)` inside them marked), comments, and text with
+/// its entities. `st` carries an open comment, tag or value to the next line.
+fn highlight_xml(line: &[char], st: &mut State, out: &mut [Tok]) {
+    let n = line.len();
+    let mut i = 0;
+    while i < n {
+        match *st {
+            State::Block => {
+                let start = i;
+                while i < n && !starts_with(line, i, "-->") {
+                    i += 1;
+                }
+                if i < n {
+                    i += 3;
+                    *st = State::Code;
+                }
+                out[start..i.min(n)].fill(Tok::Comment);
+            }
+            State::Str(s) => {
+                // An attribute value; the tag goes on after it.
+                while i < n {
+                    let c = line[i];
+                    if c == s.quote {
+                        out[i] = Tok::Quote;
+                        i += 1;
+                        *st = State::Tag;
+                        break;
+                    }
+                    let special = if c == '&' {
+                        xml_entity(line, i).map(|e| (e, Tok::Escape))
+                    } else {
+                        msbuild_ref(line, i).map(|e| (e, Tok::Interp))
+                    };
+                    match special {
+                        Some((e, tok)) => {
+                            out[i..e].fill(tok);
+                            i = e;
+                        }
+                        None => {
+                            out[i] = Tok::Str;
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            State::Tag => {
+                let c = line[i];
+                if c == '>' || ((c == '/' || c == '?') && line.get(i + 1) == Some(&'>')) {
+                    i += if c == '>' { 1 } else { 2 };
+                    *st = State::Code;
+                } else if c == '"' || c == '\'' {
+                    out[i] = Tok::Quote;
+                    i += 1;
+                    *st = State::Str(StrState {
+                        quote: c,
+                        triple: false,
+                        hashes: 0,
+                        esc: Esc::No,
+                        fmt: 0,
+                        multi: true,
+                    });
+                } else if xml_name_char(c) {
+                    let start = i;
+                    while i < n && xml_name_char(line[i]) {
+                        i += 1;
+                    }
+                    out[start..i].fill(Tok::Type);
+                } else {
+                    i += 1;
+                }
+            }
+            State::Code => {
+                let c = line[i];
+                if starts_with(line, i, "<!--") {
+                    out[i..(i + 4).min(n)].fill(Tok::Comment);
+                    i += 4;
+                    *st = State::Block;
+                } else if c == '<'
+                    && line
+                        .get(i + 1)
+                        .is_some_and(|&d| d == '/' || d == '?' || d == '!' || xml_name_char(d))
+                {
+                    // `<name`, `</name`, `<?xml`, `<!DOCTYPE`.
+                    i += 1;
+                    let decl = matches!(line.get(i), Some('?' | '!'));
+                    if matches!(line.get(i), Some('/' | '?' | '!')) {
+                        i += 1;
+                    }
+                    let start = i;
+                    while i < n && xml_name_char(line[i]) {
+                        i += 1;
+                    }
+                    out[start..i].fill(if decl { Tok::Macro } else { Tok::Keyword });
+                    *st = State::Tag;
+                } else if c == '&' {
+                    match xml_entity(line, i) {
+                        Some(e) => {
+                            out[i..e].fill(Tok::Escape);
+                            i = e;
+                        }
+                        None => i += 1,
+                    }
+                } else if let Some(e) = msbuild_ref(line, i) {
+                    out[i..e].fill(Tok::Macro);
+                    i = e;
+                } else {
+                    i += 1;
+                }
+            }
+        }
     }
 }
 
@@ -714,6 +1437,10 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
     if lang.plain {
         return out;
     }
+    if lang.strs == Strs::Xml {
+        highlight_xml(line, st, &mut out);
+        return out;
+    }
     let mut i = 0;
     while i < n {
         match *st {
@@ -735,7 +1462,7 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
                 i = scan_string(line, i, s, &mut out, st);
                 continue;
             }
-            State::Code => {}
+            State::Code | State::Tag => {}
         }
         let c = line[i];
         if let Some((s, _)) = lang.block {
@@ -760,6 +1487,36 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
             }
             out[start..i].fill(Tok::Macro);
             continue;
+        }
+        if lang.directives && c == '#' && line[..i].iter().all(|c| c.is_whitespace()) {
+            // `#region`, `#if DEBUG`, `#nullable enable`.
+            let start = i;
+            i += 1;
+            while i < n && line[i].is_alphanumeric() {
+                i += 1;
+            }
+            out[start..i].fill(Tok::Macro);
+            continue;
+        }
+        if lang.vars && c == '$' {
+            if let Some(e) = shell_var(line, i) {
+                out[i..e].fill(Tok::Macro);
+                i = e;
+                continue;
+            }
+        }
+        if lang.strs == Strs::Sql {
+            if c == '"' || c == '`' {
+                // A quoted name: no keywords inside.
+                let e = line[i + 1..].iter().position(|&q| q == c).map_or(n, |p| i + p + 2);
+                i = e;
+                continue;
+            }
+            if let Some(e) = sql_param(line, i) {
+                out[i..e].fill(Tok::Macro);
+                i = e;
+                continue;
+            }
         }
         if let Some((open, s)) = string_open(lang.strs, line, i) {
             let e = (i + open).min(n);
@@ -789,10 +1546,14 @@ pub fn highlight_line(lang: &LangDef, line: &[char], st: &mut State) -> Vec<Tok>
             while i < n && (line[i].is_alphanumeric() || line[i] == '_') {
                 i += 1;
             }
-            let word: String = line[start..i].iter().collect();
+            let mut word: String = line[start..i].iter().collect();
+            if lang.ci {
+                word.make_ascii_lowercase();
+            }
             let w = word.as_str();
             let next_nb = line[i..].iter().find(|c| !c.is_whitespace()).copied();
-            let tok = if lang.keywords.contains(&w) {
+            let keyword = lang.keywords.contains(&w) && (!lang.lead || at_lead(line, start, w));
+            let tok = if keyword {
                 Tok::Keyword
             } else if lang.types.contains(&w) {
                 Tok::Type
@@ -921,6 +1682,123 @@ mod tests {
         assert_eq!(
             shape(&hl(&SHELL, r#"echo "$HOME ${x:-1} $(pwd) \$" '$x'"#)),
             ".....qiiiiisiiiiiiisiiiiiiseeq.qssq"
+        );
+    }
+
+    /// One letter per character: k keyword, t type, m macro/variable, f function,
+    /// c comment, n number, then the string letters of `shape`.
+    fn kinds(t: &[Tok]) -> String {
+        t.iter()
+            .map(|t| match t {
+                Tok::Keyword => 'k',
+                Tok::Type => 't',
+                Tok::Macro => 'm',
+                Tok::Func => 'f',
+                Tok::Comment => 'c',
+                Tok::Number => 'n',
+                Tok::Quote => 'q',
+                Tok::Str => 's',
+                Tok::Escape => 'e',
+                Tok::Interp => 'i',
+                Tok::Normal => '.',
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_new_languages_by_name() {
+        for (f, lang) in [
+            ("Dockerfile", "Dockerfile"),
+            ("Dockerfile.flyway", "Dockerfile"),
+            ("dockerfile.dev", "Dockerfile"),
+            ("api.Dockerfile", "Dockerfile"),
+            ("Containerfile", "Dockerfile"),
+            ("Dockerfile.dockerignore", "Metin"),
+            ("schema.sql", "SQL"),
+            ("Program.cs", "C#"),
+            ("App.csproj", "XML"),
+            ("Directory.Build.props", "XML"),
+            ("App.sln", "Solution"),
+            ("App.slnx", "XML"),
+            ("analysis.ipynb", "JSON"),
+        ] {
+            assert_eq!(detect(Path::new(f)).name, lang, "{}", f);
+        }
+    }
+
+    #[test]
+    fn sql_line() {
+        assert_eq!(
+            kinds(&hl(
+                &SQL,
+                "select id, \"Order\" from t where n = 'it''s' and x::int = @p -- c"
+            )),
+            "kkkkkk.............kkkk...kkkkk.....qssqqsq.kkk....ttt...mm.cccc"
+        );
+        // Keywords in any case; capitals aren't types.
+        assert_eq!(kinds(&hl(&SQL, "SELECT Name FROM Users")), "kkkkkk......kkkk......");
+        let mut st = State::default();
+        let a: Vec<char> = "insert into t values ('line one".chars().collect();
+        highlight_line(&SQL, &a, &mut st);
+        assert!(matches!(st, State::Str(_)), "SQL strings go on over lines");
+    }
+
+    #[test]
+    fn dockerfile_line() {
+        assert_eq!(
+            kinds(&hl(&DOCKERFILE, "FROM node:20 AS build")),
+            "kkkk......nn.kk......"
+        );
+        // Instructions only lead a line: `from` in a RUN line is a word.
+        assert_eq!(
+            kinds(&hl(&DOCKERFILE, "RUN echo from $HOME ${A:-b} \"$X\"")),
+            "kkk...........mmmmm.mmmmmmm.qiiq"
+        );
+        assert_eq!(kinds(&hl(&DOCKERFILE, "onbuild run make")), "kkkkkkk.kkk.....");
+    }
+
+    #[test]
+    fn csharp_strings() {
+        assert_eq!(
+            shape(&hl(&CSHARP, r#"var s = $"Hi {user.Name}, {{x}}\n";"#)),
+            "........qqsssiiiiiiiiiiisseeseeeeq."
+        );
+        assert_eq!(shape(&hl(&CSHARP, r#"@"C:\dir\" + 'x'"#)), "qqsssssssq...qsq");
+        let mut st = State::default();
+        let a: Vec<char> = r#"var j = """{"a": 1}"#.chars().collect();
+        highlight_line(&CSHARP, &a, &mut st);
+        assert!(matches!(st, State::Str(_)), "raw strings go on over lines");
+        let b: Vec<char> = r#"""";"#.chars().collect();
+        highlight_line(&CSHARP, &b, &mut st);
+        assert_eq!(st, State::Code);
+        assert_eq!(kinds(&hl(&CSHARP, "  #region Setup")), "..mmmmmmm.ttttt");
+    }
+
+    #[test]
+    fn xml_tags() {
+        assert_eq!(
+            kinds(&hl(&XML, r#"<Item Include="$(Out)\a&amp;b.dll" />"#)),
+            ".kkkk.ttttttt.qiiiiiisseeeeesssssq..."
+        );
+        assert_eq!(kinds(&hl(&XML, r#"<?xml version="1.0"?>"#)), "..mmm.ttttttt.qsssq..");
+        assert_eq!(kinds(&hl(&XML, "<A>$(B) &lt; it's</A>")), ".k.mmmm.eeee.......k.");
+        // Comments and tags go on over lines.
+        let mut st = State::default();
+        highlight_line(&XML, &"<!-- a".chars().collect::<Vec<_>>(), &mut st);
+        assert_eq!(st, State::Block);
+        let t = highlight_line(&XML, &"b --> <Tag".chars().collect::<Vec<_>>(), &mut st);
+        assert_eq!(kinds(&t), "ccccc..kkk");
+        assert_eq!(st, State::Tag);
+        let t = highlight_line(&XML, &"  Name='x'>text".chars().collect::<Vec<_>>(), &mut st);
+        assert_eq!(kinds(&t), "..tttt.qsq.....");
+        assert_eq!(st, State::Code);
+    }
+
+    #[test]
+    fn sln_line() {
+        assert_eq!(
+            kinds(&hl(&SLN, r#"Project("{FAE0}") = "App", "src\App.csproj""#)),
+            "kkkkkkk.qssssssq....qsssq..qssssssssssssssq"
         );
     }
 
