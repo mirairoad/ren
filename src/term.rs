@@ -120,6 +120,10 @@ mod imp {
         rx: Receiver<Vec<u8>>,
         pub exit: Option<i32>,
         size: (u16, u16),
+        /// When set, the output as plain text (escape sequences taken out) is
+        /// collected here too, for whoever watches it (a task's "ready"
+        /// pattern, `serverReadyAction`). The reader drains it.
+        pub tap: Option<String>,
     }
 
     fn set_cloexec(fd: libc::c_int) {
@@ -139,6 +143,23 @@ mod imp {
             cols: u16,
             title: &str,
         ) -> io::Result<Session> {
+            let env: Vec<(String, Option<String>)> = env.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
+            Self::spawn_env(cmd, cwd, &env, rows, cols, title)
+        }
+
+        /// `spawn`, with variables to set (`Some`) or take out (`None`), as a
+        /// debug adapter's `runInTerminal` asks.
+        pub fn spawn_env(
+            cmd: &[String],
+            cwd: &Path,
+            env: &[(String, Option<String>)],
+            rows: u16,
+            cols: u16,
+            title: &str,
+        ) -> io::Result<Session> {
+            if cmd.is_empty() {
+                return Err(io::Error::other("nothing to run"));
+            }
             let (rows, cols) = (rows.max(2), cols.max(10));
             let mut master: libc::c_int = 0;
             let mut slave: libc::c_int = 0;
@@ -174,7 +195,10 @@ mod imp {
                 .stdout(Stdio::from(slave_file.try_clone()?))
                 .stderr(Stdio::from(slave_file));
             for (k, v) in env {
-                c.env(k, v);
+                match v {
+                    Some(v) => c.env(k, v),
+                    None => c.env_remove(k),
+                };
             }
             unsafe {
                 c.pre_exec(|| {
@@ -212,7 +236,12 @@ mod imp {
                 rx,
                 exit: None,
                 size: (rows, cols),
+                tap: None,
             })
+        }
+
+        pub fn pid(&self) -> u32 {
+            self.child.id()
         }
 
         /// Feeds pending output into the screen. True when something changed.
@@ -220,6 +249,16 @@ mod imp {
             let mut changed = false;
             while let Ok(b) = self.rx.try_recv() {
                 self.parser.process(&b);
+                if let Some(t) = self.tap.as_mut() {
+                    t.push_str(&plain_text(&b));
+                    if t.len() > 1 << 16 {
+                        let mut cut = t.len() - (1 << 15);
+                        while !t.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        t.drain(..cut);
+                    }
+                }
                 changed = true;
             }
             if self.exit.is_none() {
@@ -328,6 +367,40 @@ impl Session {
     }
 }
 
+/// Terminal output as plain text: escape sequences out, `\r` out.
+pub fn plain_text(b: &[u8]) -> String {
+    let s = String::from_utf8_lossy(b);
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\x1b' => match it.next() {
+                Some('[') => {
+                    for c in it.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') | Some('P') | Some('_') | Some('^') => {
+                    while let Some(c) = it.next() {
+                        if c == '\x07' || (c == '\x1b' && it.peek() == Some(&'\\')) {
+                            if c == '\x1b' {
+                                it.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The user's shell, started as a login shell so PATH from the shell config applies.
 pub fn default_shell() -> Vec<String> {
     let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
@@ -361,6 +434,14 @@ mod tests {
         assert_eq!(
             key_bytes(&k(KeyCode::Char('b'), KeyModifiers::ALT), false).unwrap(),
             b"\x1bb"
+        );
+    }
+
+    #[test]
+    fn plain() {
+        assert_eq!(
+            plain_text(b"\x1b[31mRunning\x1b[0m on http://x:1\r\n\x1b]0;title\x07ok"),
+            "Running on http://x:1\nok"
         );
     }
 

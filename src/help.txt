@@ -20,6 +20,7 @@ EDITING
   Ctrl+A                           select all
   mouse                            click, drag to select, double click word, triple click line,
                                    Shift+click extends, Ctrl+click goes to definition
+                                   (moving the mouse with Ctrl held underlines the name)
   Ctrl+C / Ctrl+X / Ctrl+V         copy / cut / paste (no selection = the whole line)
   Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z)   undo / redo
   Tab / Shift+Tab                  indent / outdent (the selected lines)
@@ -43,7 +44,9 @@ TABS AND WINDOWS
                   keys (Windows Terminal, tmux, Terminal.app) Ctrl+` and Ctrl+Space send the
                   same thing, so Ctrl+Space opens the panel too; completion is then Ctrl+N
   Ctrl+K          open a folder (in place of this project's)
-  Ctrl+R          projects: the first tab (the folder's name ▾) lists the open
+  Ctrl+E          the explorer's search box (type to filter the project's files)
+  Ctrl+R          projects: the selector over the side panel (the folder's name ▾;
+                  the first tab when the panel is hidden) lists the open
                   projects, the one on screen ticked (● = unsaved changes), and
                   "Open folder…" to open another. Each project keeps its own tabs,
                   tree, language servers, terminals, debugger and git; containers
@@ -69,9 +72,10 @@ TABS AND WINDOWS
   :recover        restore the newest interrupted session with unsaved text
                   (:recover discard drops its unsaved copies)
   workspaces      name.workspace.json lists folders: {"open": ["~/a", "/b", "../c"]}
-                  (~/ = home, relative = from the file's folder). ren name.workspace.json
-                  opens them all as projects, with the tabs, unsaved text and the rest
-                  as that workspace was left. The file decides which folders open;
+                  (~/ = home, relative = from the file's folder; {open: ['~/a']} works
+                  too). ren name.workspace.json opens them all as projects, with the
+                  tabs, unsaved text and the rest as that workspace was left; a file
+                  that isn't there yet opens with a starting point to fill in and save. The file decides which folders open;
                   :workspace shows how the open projects differ from it,
                   :workspace save writes them into it (comments stay),
                   :workspace save <file> makes a new one, :workspace open <file>
@@ -83,7 +87,11 @@ FILE TREE
                preview replaces it, editing it makes it a normal tab)
   Enter        open the file as a normal tab and edit it / open or close a folder
   →  ←         open folder / close folder or go to parent
-  letter       jump to the next entry starting with it
+  typing       searches: the text goes into the search box over the tree (Ctrl+E or a
+               click there too), and the tree shows the files whose name has it (with a
+               /, whose path has it) in their folders; ↑/↓ Enter open one, Esc clears.
+               Problems: a file's counts (⊗ errors ⚠ warnings) at the right, a dot
+               on folders. The lines on the left show which folder an entry is in
   Delete / F2  prefill :rm / :mv for the selected entry
   Ctrl+Z / Ctrl+Y   undo / redo the last file command (from .bin)
 
@@ -143,8 +151,10 @@ first, then PATH. Several servers per language via "lsp.servers" in settings.
   Ctrl+.       code actions (from every server)
   Ctrl+Shift+O document symbols              Ctrl+T      workspace symbols
   F8 / Shift+F8  next / previous diagnostic
-  Red file names (tabs and tree) have errors, yellow ones only warnings;
-  a folder shows the worst of what's inside it. A second after a folder opens
+  Red file names (tabs and tree) have errors, yellow ones only warnings, with
+  their counts; a folder shows a dot for the worst of what's inside it. In the
+  code: wavy underlines, ⊗/⚠ in the gutter, and each line's problem after its
+  text (read-only; "inlineDiagnostics": false turns that off). A second after a folder opens
   the whole project is checked (Rust, Go, Python, TypeScript, C#), and again after
   saves, in the background. :scan checks again now; "scan": false turns it off.
   Inlay hints: types and parameter names in dim italics (not part of the file).
@@ -163,6 +173,12 @@ DEBUGGER (DAP)
   :watch <expr>  :unwatch [n]  :break  :breakclear
   :install [codelldb|debugpy|delve]   :uninstall <name>
   Python runs with the project's .venv interpreter.
+  .vscode/launch.json works as in VS Code: launch and attach configurations,
+  OS blocks, ${…} variables, inputs (asked on the : line as ":input <value>", or a
+  list; Esc cancels), preLaunchTask / postDebugTask from tasks.json (in terminal
+  tabs; :debug anyway after one failed), the program in a terminal tab when the
+  debugger asks (debugpy's default "console": "integratedTerminal"),
+  serverReadyAction (opens the URL), Python subprocesses (Flask's reloader).
 
 SETTINGS
   :settings            ~/.ren/settings.json (global)

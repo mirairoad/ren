@@ -36,7 +36,7 @@ struct Checker {
 
 struct Run {
     name: &'static str,
-    rx: Receiver<Option<HashMap<String, u8>>>,
+    rx: Receiver<Option<HashMap<String, Counts>>>,
     started: Instant,
 }
 
@@ -52,8 +52,8 @@ pub struct Scan {
     running: Option<Run>,
     /// Each checker's last run: when it ended and how long it took.
     took: HashMap<&'static str, (Instant, Duration)>,
-    /// What each checker found: `path_key` → 1 (error) or 2 (warning).
-    pub found: HashMap<&'static str, HashMap<String, u8>>,
+    /// What each checker found: `path_key` → (errors, warnings).
+    pub found: HashMap<&'static str, HashMap<String, Counts>>,
 }
 
 impl Editor {
@@ -261,7 +261,7 @@ impl Editor {
     /// What the checkers found, for files no live server watches: an open file
     /// with a server running shows the server's view, which follows unsaved
     /// edits.
-    pub(crate) fn scan_found(&self) -> Vec<(&String, u8)> {
+    pub(crate) fn scan_found(&self) -> Vec<(&String, Counts)> {
         let live: Vec<String> = self
             .bufs
             .iter()
@@ -292,7 +292,7 @@ fn spawn(c: Checker) -> Run {
 }
 
 /// Runs a checker over the project: None when it couldn't run.
-fn check(c: &Checker) -> Option<HashMap<String, u8>> {
+fn check(c: &Checker) -> Option<HashMap<String, Counts>> {
     match c.name {
         "ruff" => {
             let args = ["check", "--output-format", "json", "--exit-zero", "--no-cache", "."];
@@ -397,14 +397,21 @@ fn run(c: &Checker, args: Vec<OsString>) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn worst(m: &mut HashMap<String, u8>, key: String, sev: u8) {
-    let e = m.entry(key).or_insert(sev);
-    *e = (*e).min(sev);
+/// A file's problems: (errors, warnings).
+pub type Counts = (u32, u32);
+
+fn count(m: &mut HashMap<String, Counts>, key: String, sev: u8) {
+    let e = m.entry(key).or_default();
+    if sev == 1 {
+        e.0 += 1;
+    } else {
+        e.1 += 1;
+    }
 }
 
 /// `ruff check --output-format json`, with ruff's server severities: syntax
 /// errors, undefined names and unreadable files are errors, the rest warnings.
-fn parse_ruff(out: &str) -> Option<HashMap<String, u8>> {
+fn parse_ruff(out: &str) -> Option<HashMap<String, Counts>> {
     let v: Value = serde_json::from_str(out).ok()?;
     let mut m = HashMap::new();
     for d in v.as_array()? {
@@ -413,14 +420,14 @@ fn parse_ruff(out: &str) -> Option<HashMap<String, u8>> {
             None | Some("invalid-syntax" | "F821" | "E902" | "E999") => 1,
             _ => 2,
         };
-        worst(&mut m, path_key(Path::new(f)), sev);
+        count(&mut m, path_key(Path::new(f)), sev);
     }
     Some(m)
 }
 
 /// `tsc --pretty false`: `src/a.ts(3,7): error TS2322: …`, paths relative to
 /// the project. Indented lines continue the message above.
-fn parse_tsc(out: &str, root: &Path) -> HashMap<String, u8> {
+fn parse_tsc(out: &str, root: &Path) -> HashMap<String, Counts> {
     let mut m = HashMap::new();
     for line in out.lines().filter(|l| !l.starts_with(char::is_whitespace)) {
         let Some((loc, rest)) = line.split_once("): ") else {
@@ -436,7 +443,7 @@ fn parse_tsc(out: &str, root: &Path) -> HashMap<String, u8> {
         } else {
             continue;
         };
-        worst(&mut m, path_key(&absolute(&root.join(file))), sev);
+        count(&mut m, path_key(&absolute(&root.join(file))), sev);
     }
     m
 }
@@ -455,10 +462,10 @@ mod tests {
             {"code": "invalid-syntax", "filename": "/p/d.py", "message": "syntax"}
         ]"#;
         let m = parse_ruff(out).unwrap();
-        assert_eq!(m.get("/p/a.py"), Some(&1));
-        assert_eq!(m.get("/p/b.py"), Some(&2));
-        assert_eq!(m.get("/p/c.py"), Some(&1));
-        assert_eq!(m.get("/p/d.py"), Some(&1));
+        assert_eq!(m.get("/p/a.py"), Some(&(1, 1)));
+        assert_eq!(m.get("/p/b.py"), Some(&(0, 1)));
+        assert_eq!(m.get("/p/c.py"), Some(&(1, 0)));
+        assert_eq!(m.get("/p/d.py"), Some(&(1, 0)));
         assert!(parse_ruff("ruff failed").is_none());
     }
 
@@ -469,8 +476,8 @@ mod tests {
                    /p/App.csproj : error NU1101: Unable to find package Nope.\n";
         let m = parse_tsc(out, Path::new("/p"));
         assert_eq!(m.len(), 2);
-        assert_eq!(m.get("/p/Program.cs"), Some(&1));
-        assert_eq!(m.get("/p/Other.cs"), Some(&2));
+        assert_eq!(m.get("/p/Program.cs"), Some(&(1, 0)));
+        assert_eq!(m.get("/p/Other.cs"), Some(&(0, 1)));
 
         let dir = env::temp_dir().join(format!("ren-dotnet-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -495,7 +502,7 @@ mod tests {
                    error TS5083: Cannot read file 'tsconfig.base.json'.\n";
         let m = parse_tsc(out, Path::new("/p"));
         assert_eq!(m.len(), 2);
-        assert_eq!(m.get("/p/src/a.ts"), Some(&1));
-        assert_eq!(m.get("/p/src/b.ts"), Some(&2));
+        assert_eq!(m.get("/p/src/a.ts"), Some(&(1, 0)));
+        assert_eq!(m.get("/p/src/b.ts"), Some(&(0, 1)));
     }
 }

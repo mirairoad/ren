@@ -45,7 +45,7 @@ Nothing is deleted for real: `:rm`, and anything `:cp` or `:mv` would overwrite,
 
 ### Several projects in one window
 
-The first tab is not a file: it shows the open folder's name, and clicking it (or `Ctrl+R`) lists your open projects with "Open folder…" at the end. Each project has its own tabs, file tree, language servers, terminals, debugger and git panel, and keeps running while you work in another. See [Projects](#projects).
+The project selector heads the side panel, its full width: it shows the open folder's name, and clicking it (or `Ctrl+R`) lists your open projects with "Open folder…" at the end (with the side panel hidden, it's the first tab). Each project has its own tabs, file tree, language servers, terminals, debugger and git panel, and keeps running while you work in another. See [Projects](#projects).
 
 Folders you always open together can go in a workspace file, `team.workspace.json` with `{ "open": ["~/work/api", "~/work/web"] }`: `ren team.workspace.json` opens them all, as you left them last time. See [Workspaces](#workspaces).
 
@@ -57,9 +57,10 @@ What you have open (every project, its tabs and cursors, and unsaved text) is sa
 
 - **Git panel** (`:git`) — staged and unstaged files with checkboxes, side-by-side diffs, staging of single lines, branches, stash, push/pull and a commit form built from your own templates.
 - **Bottom panel** (`` Ctrl+` ``), under the editor (the file tree keeps its full height) — a real terminal (several sessions; hover a tab for its × to kill it), the debugger, and a Containers tab for Docker-compatible sockets (status, start/stop/restart, live logs, shell into a container).
-- **File tree** — Space previews a file without leaving the tree, Enter opens it; optional Nerd Font file icons. Files with errors show red (in the tree and on their tab), files with only warnings yellow, and folders take the worst colour of what's inside. The whole project is checked when it opens, not only the files you open (see Project scan).
+- **File tree** — a search box under the project selector filters the whole project as you type (`Ctrl+E`, or just start typing in the tree; `.gitignore` respected). Indent guides show which folder each entry is in. Space previews a file without leaving the tree, Enter opens it; optional Nerd Font file icons. Files with errors show red with their counts (`⊗2 ⚠1`, in the tree and on their tab), files with only warnings yellow, and folders a dot in the worst colour of what's inside. The whole project is checked when it opens, not only the files you open (see Project scan).
+- **Problems in the code** — wavy underlines, an error / warning icon in the gutter, and each line's problem written after it (read-only, on a tint), as with VS Code's Error Lens; `"inlineDiagnostics": false` turns the messages off.
 - **Language Server Protocol** — completion (including auto-imports and snippet expansion), diagnostics with rule codes, hover, go to definition, references, code actions with resolve support, signature help, rename, document formatting, and inlay hints (types and parameter names drawn in the code, like VS Code). Servers come from the project's `.venv` / `node_modules/.bin` first, then `PATH`, and several can run for one language (e.g. basedpyright + ruff).
-- **Mouse** — click to place the cursor, drag to select, double/triple click for word/line selection, scroll, tab switching, context menu, Ctrl+click to jump to a definition, resizable file tree.
+- **Mouse** — click to place the cursor, drag to select, double/triple click for word/line selection, scroll, tab switching, context menu, Ctrl+click to jump to a definition (holding Ctrl over a name underlines it like a link, as in VS Code), resizable file tree.
 - **Debugger (DAP)** — breakpoints, stepping, variables tree, call stack, watches and a debug console. Works with CodeLLDB, lldb-dap and gdb for Rust/C/C++, debugpy for Python and Delve for Go. Missing adapters are downloaded on first use, Rust projects are built automatically, Python runs in the project's `.venv`, and `.vscode/launch.json` configurations can be picked from the Debug tab.
 - **Markdown preview** — `Ctrl+Shift+V` (or `:preview`, or the `◧ Preview` switch in the status bar) shows a `.md` file rendered: headings, paragraphs wrapped to the window, bullets and numbered lists, task boxes, quotes and GitHub alerts, tables drawn as a grid with aligned columns, code blocks in their language's colours, bold, italic, links, and the HTML a README uses (`<p align="center">`, `<img alt>`, `<h1>`). The same key (or `Esc`) goes back to the text, at the same place; the file isn't touched.
 - **Find and replace** — inline find bar with live highlighting, match counter, case/whole-word/regex options, capture-group replacement and single-step undo for replace-all.
@@ -150,7 +151,8 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 | `Ctrl+W` | cycle focus: editor → side panel → bottom panel |
 | `` Ctrl+` `` | bottom panel: Terminal, Debug, Containers (or `:panel`). In terminals without the kitty keyboard protocol (Windows Terminal under WSL, tmux, Terminal.app) `` Ctrl+` `` and `Ctrl+Space` send the same thing, so both open the panel there, and completion is `Ctrl+N` |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab |
-| `Ctrl+R` | project list: switch project, or "Open folder…" (same as clicking the first tab) |
+| `Ctrl+R` | project list: switch project, or "Open folder…" (same as clicking the project selector) |
+| `Ctrl+E` | the explorer's search box: type to filter the project's files, `↑`/`↓` and `Enter` to open one, `Esc` to clear |
 | `:q` / `:qa` | close the tab (the last one leaves the welcome screen; ren stays open) / quit ren, saving the session to reopen from the welcome screen or `ren --resume` |
 | `:w` / `:wq` | save / save and close the tab |
 | hover a tab | its icon turns into ×: click it (or middle-click the tab) to close; unsaved tabs open `:` for `q!` / `wq` |
@@ -161,6 +163,7 @@ Type `:help` on the command line for the full keymap. `Ctrl+Esc` (or `Esc` in te
 |---|---|
 | `Space` | preview the file, focus stays in the tree (the next preview replaces it) |
 | `Enter` | open the file as a normal tab and edit it |
+| typing | searches: the text goes into the search box and the tree shows only the files whose name has it (or whose path has it, when it has a `/`), in their folders. `Esc` clears it |
 | `Delete` / `F2` | prefill `:rm` / `:mv` for the selected entry |
 
 ### Commands
@@ -221,7 +224,7 @@ Paths: `/x` is the workspace root, `~/x` your home, and anything else is relativ
 
 ## Projects
 
-The first tab is the project selector: the open folder's name with a `▾`. Click it, or press `Ctrl+R`, for the list:
+The project selector heads the side panel, across its full width: the open folder's name with a `▾` (and `2/3` with several open). With the side panel hidden it's the first tab. Click it, or press `Ctrl+R`, for the list:
 
 - the open projects, the one on screen ticked, `●` next to one with unsaved changes;
 - **Open folder…** at the end: pick a folder and it opens as another project.
@@ -292,7 +295,7 @@ Sessions live in `~/.ren/sessions/`, one folder per session. ren keeps the 12 ne
 
 ## Workspaces
 
-A workspace file lists folders that open together. Its name ends in `.workspace.json`, and it can live anywhere:
+A workspace file lists folders that open together. Its name ends in `.workspace.json`, and it can live anywhere. Comments and trailing commas are allowed, and so is JavaScript's way of writing it (`{ open: ['~/work/api', '../notes'] }`):
 
 ```jsonc
 // ~/work/team.workspace.json
@@ -307,9 +310,11 @@ A workspace file lists folders that open together. Its name ends in `.workspace.
 
 `ren ~/work/team.workspace.json` opens every folder as a project, in that order, and brings back where the workspace was left: each project's tabs, cursors and scroll, its file tree and bottom panel, unsaved text, and the project that was on screen. The first time, the folders just open, each with its file tree.
 
+When the file doesn't exist yet, `ren team.workspace.json` opens it as a new tab with a starting point that lists the folder you ran ren in: add the other folders, save (`Ctrl+S`), and `:workspace open` opens them. Or open the folders first and let `:workspace save team.workspace.json` write the file.
+
 This works because the window's session is tied to the file, so it's found again by the file rather than from the session list. It still shows in the list, as `team: api + infra + notes`, and restoring it from there (or `ren --resume`) ties the window to the file again.
 
-**The file decides which folders open.** A folder added to the file since last time opens fresh; one taken out stays closed; one that doesn't exist (not cloned on this machine yet) is skipped and named in the status bar. Opening or closing projects in the window doesn't touch the file: the status bar says when the projects no longer match it (`not in team.workspace.json`), the project list (`Ctrl+R`) gets a "Save projects to team.workspace.json" row, and `:workspace save` writes the open projects into it. Only the `"open"` list is rewritten, so comments and any other keys stay; entries already there keep how they were written, and new ones are written as `~/…` or absolute paths.
+**The file decides which folders open.** A folder added to the file since last time opens fresh; one taken out stays closed; one that doesn't exist (not cloned on this machine yet) is skipped and named in the status bar. Opening or closing projects in the window doesn't touch the file: the status bar says when the projects no longer match it (`not in team.workspace.json`), the project list (`Ctrl+R`) gets a "Save projects to team.workspace.json" row, and `:workspace save` writes the open projects into it. Only the `"open"` list is rewritten, so comments and any other keys stay (a file written JavaScript-style is written back as JSON); entries already there keep how they were written, and new ones are written as `~/…` or absolute paths.
 
 | Command | Action |
 |---|---|
@@ -348,7 +353,26 @@ Tools are stored in `%LOCALAPPDATA%\ren\tools` on Windows and `$XDG_DATA_HOME/re
 
 For Rust, ren runs `cargo build` and debugs the produced binary. For C/C++, pass the program with `:debug ./a.out [args]`. Program arguments can be set with `:debug args ...`.
 
-If the workspace contains `.vscode/launch.json`, its `launch` configurations with a supported type (`lldb`, `lldb-dap`, `cppdbg`, `gdb`, `debugpy`, `python`, `go`) are listed when you press `F5` (or `:debug config`, or the `config ▾` label in the Debug tab header); the one you pick is remembered. Comments, trailing commas, `${workspaceFolder}`, `${file}`, `${env:NAME}` and similar variables are supported, as is CodeLLDB's `cargo` field. Python runs with the project's `.venv` interpreter when there is one.
+### launch.json, as in VS Code
+
+A `.vscode/launch.json` that works in VS Code works the same in ren: ren does what VS Code and the debugger's extension do to a configuration before it reaches the debug adapter (taken from their source).
+
+- **The list.** `F5` (or `:debug config`, or `config ▾` in the Debug tab header) lists the `launch` and `attach` configurations of a type ren runs (`debugpy`, `python`, `lldb`/`codelldb`, `lldb-dap`, `cppdbg`, `gdb`, `go`) in VS Code's order: `presentation.hidden` ones left out, `presentation.group` / `order` first. The one you pick is remembered. Comments and trailing commas are allowed.
+- **Platforms.** A configuration's `windows` / `linux` / `osx` block (`linux` on WSL) goes over it, key by key (a platform `env` replaces the whole `env`, as in VS Code).
+- **Variables.** `${workspaceFolder}`, `${workspaceFolder:name}` (another open project), `${workspaceFolderBasename}`, `${file}`, `${fileWorkspaceFolder}`, `${relativeFile}`, `${relativeFileDirname}`, `${fileBasename}`, `${fileBasenameNoExtension}`, `${fileExtname}`, `${fileDirname}`, `${fileDirnameBasename}`, `${cwd}`, `${lineNumber}`, `${columnNumber}`, `${selectedText}`, `${execPath}`, `${pathSeparator}` / `${/}`, `${userHome}`, `${env:NAME}`, `${defaultBuildTask}`, and `${config:NAME}` from `.vscode/settings.json`, everywhere in the configuration (object keys too). Unknown ones stay as written; one that can't be resolved (`${file}` with no file open) stops the launch with VS Code's message.
+- **Inputs.** `${input:id}` asks before the launch: a `promptString` on the `:` line (`:input <value>`, prefilled with the last answer or the default, the description at the right), a `pickString` as a list. `${command:pickProcess}` (and `pickMyProcess`, `pickGoProcess`, …) lists the running processes to attach to; `${command:python.interpreterPath}` is the project's Python. `Esc` cancels the launch.
+- **Tasks.** `preLaunchTask` runs a task from `.vscode/tasks.json` first, in a terminal tab, with what it `dependsOn` (side by side, or one after the other with `"dependsOrder": "sequence"`): `shell` tasks through your shell, `process` tasks as they are, `options.cwd` / `env` / `shell`, the file's top-level `options`, OS blocks. The launch goes on when the task exits with 0; a background task (`isBackground`) when its problem matcher's `background.endsPattern` shows (`$tsc-watch` and `$tsgo-watch` are known). When it fails, `:debug anyway` launches all the same. `postDebugTask` runs when the session ends.
+- **The program's terminal.** Debuggers that run the program in a terminal (`runInTerminal`) get a terminal tab: debugpy with VS Code's default `"console": "integratedTerminal"`, CodeLLDB with its default `"terminal": "integrated"`, lldb-dap with `"console": "integratedTerminal"`. The program reads the keyboard there; `"console": "internalConsole"` puts its output in the Debug tab instead.
+- **`serverReadyAction`.** The first output (Debug tab or the program's terminal) matching its `pattern` opens its URL in your browser (on WSL, the Windows one), as `openExternally` does.
+- **`attach`.** debugpy with `connect` (or `host` / `port`) connects straight to the debugpy listening there (e.g. in a container: `pathMappings` map its files to yours); with `processId`, debugpy attaches to that process. Go with `port` connects to a running `dlv`; `processId` attaches locally. CodeLLDB, lldb-dap and gdb attach by `pid` / `processId`.
+
+**Python** (as the Python Debugger extension): `console` defaults to `integratedTerminal`, `cwd` to the folder, `envFile` to `${workspaceFolder}/.env` (read with the extension's rules: `NAME=value`, quotes, values over several lines, `${NAME}` from the file or `env`); `env` goes over the file, `PATH` / `PYTHONPATH` are added to rather than replaced, and `PYTHONUNBUFFERED` / `PYTHONIOENCODING` are set. `justMyCode`, `showReturnValue`, `jinja` (on for Flask and FastAPI unless `false`), `django`, `subProcess`, `redirectOutput`, `stopOnEntry`, `sudo`, `gevent` work as there. `python` (or the older `pythonPath`) is the interpreter, else the project's `.venv`; `module` and `code` run instead of `program`. Subprocesses (Flask's or Django's reloader with `--debug`, `multiprocessing`) are attached in the background with your breakpoints, and the one that stops comes on screen; `Shift+F5` stops them all.
+
+**Go** (as vscode-go): `mode: auto` is `test` for a `_test.go` file, else `debug`; `program` (a folder or a `.go` file) is where `dlv` builds; `envFile` (one or a list) then `env`; `buildFlags`, `dlvFlags`, `showLog`, `substitutePath` are passed on.
+
+**C / C++** `cppdbg` configurations run with gdb's own debug adapter (`gdb -i dap`, gdb 14+) or lldb-dap (`"MIMode": "lldb"`): `program`, `args`, `cwd`, `environment` and `envFile`, `stopAtEntry`, `setupCommands`, `processId` and `miDebuggerServerAddress` are turned into theirs. CodeLLDB configurations (`lldb`) run as they are, with its `cargo` field building the program first.
+
+Without a launch.json, `F5` debugs the open file with ren's own settings (Python output in the Debug tab).
 
 CodeLLDB gives the best Rust experience: it pretty-prints `Vec`, `String`, `HashMap` and other standard types. In the debug console expressions are evaluated directly; prefix a line with `` ` `` to run a raw LLDB command (`` `frame info ``).
 
@@ -434,6 +458,7 @@ Everything lives in `~/.ren/` (`%USERPROFILE%\.ren\` on Windows). The installer 
 | `theme.primary` | `"#DA56D1"` | primary colour (`#RRGGBB` or `#RGB`): logo, focused panels, badges, find and debug highlights |
 | `formatOnSave` | `true` | format through the language server before writing (`Ctrl+S`, `:save`) |
 | `icons` | `true` | Nerd Font file-type icons in the tree and tabs (Ghostty ships the symbols; other terminals need a Nerd Font) |
+| `inlineDiagnostics` | `true` | each line's problem written after its text, in its colour (read-only) |
 | `scan` | `true` | check the whole project when it opens and after saves, for red/yellow file names (see Project scan under Language servers). Takes effect for pyright/basedpyright on `:lsp restart` |
 | `inlayHints.enabled` | `true` | types and parameter names from the language server, drawn in the code. `"inlayHints": false` is short for this |
 | `inlayHints.types` | `true` | variable types: `let x: i32`, Go `range` variables, Python `x: int` |
@@ -457,8 +482,8 @@ Format on save sends `textDocument/formatting` to the file's language server and
 Releases are produced by GitHub Actions (`.github/workflows/build.yml`). Every push to `main` and every pull request runs `cargo fmt --check` and clippy, and builds and tests Linux x86_64 and arm64 (static, musl; arm64 on GitHub's Arm runner) and macOS arm64; pushing a version tag also publishes a GitHub Release with those three binaries attached:
 
 ```sh
-git tag v0.4.2
-git push origin v0.4.2
+git tag v0.4.3
+git push origin v0.4.3
 ```
 
 Bump `version` in `Cargo.toml` first: the welcome screen and `ren --version` show it.

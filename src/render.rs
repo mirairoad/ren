@@ -32,6 +32,13 @@ const INK: Color = rgb(0x1b, 0x1e, 0x23);
 /// Inlay hints: dim italic text on a faint box, so they don't read as code or comments.
 const HINT: Color = rgb(0x8b, 0x92, 0xa0);
 const HINT_BG: Color = rgb(0x2f, 0x34, 0x3e);
+/// Backgrounds of a problem's message after its line, by severity.
+const ERR_BG: Color = rgb(0x45, 0x26, 0x2c);
+const WARN_BG: Color = rgb(0x42, 0x38, 0x22);
+const INFO_BG: Color = rgb(0x22, 0x35, 0x48);
+/// The tree's indent guides, and the one around the selection.
+const GUIDE: Color = rgb(0x3b, 0x40, 0x4b);
+const GUIDE_ON: Color = rgb(0x6b, 0x72, 0x80);
 /// Where the `:` command text starts in the bottom bar: after " COMMAND " and a space.
 const CMD_X: u16 = 11;
 static PRIMARY: AtomicU32 = AtomicU32::new(crate::settings::DEFAULT_PRIMARY);
@@ -112,6 +119,31 @@ fn wrap(line: &str, width: usize) -> Vec<String> {
         }
     }
     out.push(cur.trim_end().to_string());
+    out
+}
+
+fn sev_bg(sev: u8) -> Color {
+    match sev {
+        1 => ERR_BG,
+        2 => WARN_BG,
+        _ => INFO_BG,
+    }
+}
+
+/// `⊗2 ⚠1`: a file's errors and warnings, with their colours.
+fn badges(e: u32, w: u32, icons: bool) -> Vec<(String, Color)> {
+    let (ei, wi) = if icons {
+        (icons::ERROR, icons::WARNING)
+    } else {
+        ('⊗', '⚠')
+    };
+    let mut out = Vec::new();
+    if e > 0 {
+        out.push((format!("{}{}", ei, e), ERR));
+    }
+    if w > 0 {
+        out.push((format!("{}{}", wi, w), TYPE));
+    }
     out
 }
 
@@ -265,7 +297,7 @@ impl Editor {
             _ if self.focus == Focus::Diff => None,
             _ if self.focus == Focus::Find => self.find_cursor.get(),
             _ if self.focus == Focus::Panel => self.dbg_cursor.get(),
-            _ if self.focus == Focus::Tree => None,
+            _ if self.focus == Focus::Tree => self.tree_search_cursor(&self.layout()),
             _ if self.is_splash() => None,
             _ if self.buf().md_view => None,
             _ => {
@@ -303,8 +335,17 @@ impl Editor {
         s.fill_row(TAB_H - 1, Style::new().on(BAR));
         let y = TAB_H - 1;
         self.tab_spans.clear();
-        let marks = self.problem_marks();
-        let mut x = self.draw_project_selector(s, y);
+        let counts = self.problem_counts();
+        // With the side panel shown, the project selector heads it and the
+        // tabs start after it; without, the selector is the first tab.
+        let mut x = if self.tree.visible {
+            let l = self.layout();
+            self.draw_side_selector(s, y, l.tree_w);
+            s.put_char(l.tree_w, y, '│', Style::fg(primary()).on(BAR));
+            l.ed_x
+        } else {
+            self.draw_project_selector(s, y)
+        };
         for (i, b) in self.bufs.iter().enumerate() {
             let active = i == self.cur;
             let mut st = if active {
@@ -332,13 +373,27 @@ impl Editor {
             } else {
                 nx = s.put(nx, y, " ", st);
             }
-            let label = format!(" {}{} ", b.name, if b.dirty { " ●" } else { "" });
-            // Red title when the file has errors, yellow when only warnings.
+            // Red title when the file has errors, yellow when only warnings,
+            // and how many of each.
             let mut lst = st;
-            if let Some(&sev) = b.path.as_ref().and_then(|p| marks.get(&path_key(p))) {
-                lst.fg = sev_color(sev);
+            let (e, w) = b
+                .path
+                .as_ref()
+                .and_then(|p| counts.get(&path_key(p)).copied())
+                .unwrap_or_default();
+            if e > 0 {
+                lst.fg = ERR;
+            } else if w > 0 {
+                lst.fg = TYPE;
             }
-            let nx = s.put(nx, y, &label, lst);
+            let mut nx = s.put(nx, y, &format!(" {}", b.name), lst);
+            for (txt, c) in badges(e, w, self.settings.icons) {
+                let mut bst = st;
+                bst.fg = c;
+                bst.bold = false;
+                nx = s.put(nx, y, &format!(" {}", txt), bst);
+            }
+            let nx = s.put(nx, y, if b.dirty { " ● " } else { " " }, st);
             // The open tab's line sits at the bottom of the padding row, right on
             // top of its label.
             if active {
@@ -357,6 +412,35 @@ impl Editor {
         if x + bw + 2 <= s.w {
             s.put(s.w - bw, y, brand, Style::fg(DIM).on(BAR));
         }
+    }
+
+    /// The project selector heading the side panel, the panel's full width:
+    /// the folder's icon and name, and `▾` at the right (with `2/3` when
+    /// several projects are open).
+    fn draw_side_selector(&mut self, s: &mut Screen, y: u16, w: u16) {
+        let open = self.menu.as_ref().is_some_and(|m| m.title == PROJECTS_TITLE);
+        let bg = if open { SEL } else { POP };
+        s.fill(0, y, w, Style::new().on(bg));
+        let st = Style::fg(primary()).on(bg).bold();
+        let mut right = format!("{} ", '▾');
+        if self.project_count() > 1 {
+            right = format!("{}/{} {}", self.project_index() + 1, self.project_count(), right);
+        }
+        let rw = text_w(&right) as u16;
+        let mut x = s.put(0, y, " ", st);
+        if self.settings.icons {
+            let (ic, col) = if open { icons::FOLDER_OPEN } else { icons::FOLDER };
+            let mut ist = st;
+            ist.fg = col;
+            x += s.put_char(x, y, ic, ist);
+            x = s.put(x, y, " ", st);
+        }
+        let room = w.saturating_sub(x + rw + 1) as usize;
+        put_clip(s, x, y, &self.tree.root_name(), st, room);
+        let rx = w.saturating_sub(rw);
+        let chev = Style::fg(if self.project_count() > 1 { BRIGHT } else { DIM }).on(bg);
+        s.put(rx, y, &right, chev);
+        self.proj_span = (0, w);
     }
 
     /// The first spot of the tab bar: the project on screen, by its folder's
@@ -385,16 +469,75 @@ impl Editor {
         x
     }
 
-    fn draw_tree(&self, s: &mut Screen, l: &Layout) {
+    /// The explorer's search box, the side panel's full width under the
+    /// project selector: what's typed (or a placeholder), and how many files
+    /// it found.
+    fn draw_tree_search(&self, s: &mut Screen, l: &Layout) {
         let t = &self.tree;
-        let focused = self.focus == Focus::Tree;
         let w = l.tree_w;
-        // No title row: the project selector in the tab bar names the folder.
+        let y = l.top;
+        let active = self.focus == Focus::Tree && t.typing;
+        let bg = if active { SEL } else { POP };
+        s.fill(0, y, w, Style::new().on(bg));
+        let icon = if self.settings.icons { icons::SEARCH } else { '⌕' };
+        let ist = Style::fg(if active { primary() } else { DIM }).on(bg);
+        let mut x = s.put(0, y, " ", ist);
+        x += s.put_char(x, y, icon, ist);
+        x = s.put(x, y, " ", ist);
+        let count = if t.searching() {
+            match t.found() {
+                0 => " none ".to_string(),
+                n => format!(" {} ", n),
+            }
+        } else {
+            String::new()
+        };
+        let room = (w as usize).saturating_sub(x as usize + text_w(&count));
+        if t.query.is_empty() {
+            put_clip(s, x, y, "Search files", Style::fg(DIM).on(bg).italic(), room);
+        } else {
+            // The end of a long query stays in sight, where the cursor is.
+            let q: Vec<char> = t.query.chars().collect();
+            let skip = q.len().saturating_sub(room.saturating_sub(1));
+            let shown: String = q[skip..].iter().collect();
+            put_clip(s, x, y, &shown, Style::fg(BRIGHT).on(bg), room);
+        }
+        if !count.is_empty() {
+            let c = if t.found() == 0 { ERR } else { DIM };
+            s.put(w.saturating_sub(text_w(&count) as u16), y, &count, Style::fg(c).on(bg));
+        }
+    }
+
+    /// Where the search box's cursor goes while it has the keys.
+    pub(crate) fn tree_search_cursor(&self, l: &Layout) -> Option<(u16, u16)> {
+        let t = &self.tree;
+        if !(t.visible && t.typing) || self.git_active() {
+            return None;
+        }
+        let x = 3 + text_w(&t.query) as u16;
+        Some((x.min(l.tree_w.saturating_sub(1)), l.top))
+    }
+
+    fn draw_tree(&self, s: &mut Screen, l: &Layout) {
+        self.draw_tree_search(s, l);
+        let t = &self.tree;
+        let focused = self.focus == Focus::Tree && !t.typing;
+        let w = l.tree_w;
         let open_path = self.buf().path.as_deref();
-        let marks = self.problem_marks();
-        for r in 0..l.side_h as usize {
+        let counts = self.problem_counts();
+        // The guide around the selection: its folder's, from the folder's row
+        // to its last entry.
+        let active_guide = t.parent_of(t.sel).map(|p| {
+            let d = t.nodes[p].depth;
+            let end = (p + 1..t.nodes.len())
+                .find(|&j| t.nodes[j].depth <= d)
+                .unwrap_or(t.nodes.len());
+            (d, p + 1, end)
+        });
+        let query: Vec<char> = t.query.to_lowercase().chars().collect();
+        for r in 0..l.tree_h as usize {
             let i = t.scroll + r;
-            let y = l.top + r as u16;
+            let y = l.tree_top + r as u16;
             let Some(n) = t.nodes.get(i) else { break };
             let selected = i == t.sel;
             let mut st = if n.is_dir {
@@ -404,8 +547,8 @@ impl Editor {
             } else {
                 Style::new()
             };
-            if selected && focused {
-                let tint = primary_tint();
+            let tint = primary_tint();
+            if selected && (focused || (self.focus == Focus::Tree && t.searching())) {
                 st = Style::fg(BRIGHT).on(tint).bold();
                 s.fill(0, y, w, Style::new().on(tint));
             }
@@ -420,6 +563,18 @@ impl Editor {
             };
             let lead = format!(" {}{}", "  ".repeat(n.depth), arrow);
             let mut x = put_clip(s, 0, y, &lead, st, w as usize);
+            // Indent guides: a line under each folder this entry is in.
+            for d in 0..n.depth {
+                let gx = 1 + 2 * d as u16;
+                if gx >= w {
+                    break;
+                }
+                let on = active_guide.is_some_and(|(gd, a, e)| gd == d && i >= a && i < e);
+                let mut gst = st;
+                gst.fg = if on { GUIDE_ON } else { GUIDE };
+                gst.bold = false;
+                s.put_char(gx, y, '│', gst);
+            }
             if self.settings.icons && x + 2 <= w {
                 let (ic, col) = if n.is_dir {
                     if n.expanded {
@@ -435,13 +590,55 @@ impl Editor {
                 x += s.put_char(x, y, ic, ist);
                 x += s.put_char(x, y, ' ', st);
             }
-            // Red name when the file (or something in the folder) has errors,
-            // yellow when only warnings.
+            // Problems: the name red (errors) or yellow (warnings only), and
+            // at the right a file's counts, a folder's dot.
+            let (e, wn) = counts.get(&path_key(&n.path)).copied().unwrap_or_default();
             let mut nst = st;
-            if let Some(&sev) = marks.get(&path_key(&n.path)) {
-                nst.fg = sev_color(sev);
+            if e > 0 {
+                nst.fg = ERR;
+            } else if wn > 0 {
+                nst.fg = TYPE;
             }
-            put_clip(s, x, y, &n.name, nst, w.saturating_sub(x) as usize);
+            let marks: Vec<(String, Color)> = if n.is_dir {
+                match (e, wn) {
+                    (0, 0) => Vec::new(),
+                    (0, _) => vec![("●".into(), TYPE)],
+                    _ => vec![("●".into(), ERR)],
+                }
+            } else {
+                badges(e, wn, self.settings.icons)
+            };
+            let marks_w: usize = marks.iter().map(|(t, _)| text_w(t) + 1).sum();
+            let name_room = (w as usize).saturating_sub(x as usize + marks_w + 1);
+            let nx = put_clip(s, x, y, &n.name, nst, name_room);
+            // What the search matched, in the name, stands out.
+            if !query.is_empty() && !t.query.contains('/') {
+                let name: Vec<char> = n.name.chars().collect();
+                let low: Vec<char> = name.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
+                if let Some(a) = (0..low.len()).find(|&a| low[a..].starts_with(&query)) {
+                    let mut mx = x;
+                    for (k, &c) in name.iter().enumerate() {
+                        let cw = char_width(c, 0) as u16;
+                        if mx + cw > nx {
+                            break;
+                        }
+                        if k >= a && k < a + query.len() {
+                            let mut hst = nst;
+                            hst.fg = primary();
+                            hst.bold = true;
+                            s.put_char(mx, y, c, hst);
+                        }
+                        mx += cw;
+                    }
+                }
+            }
+            let mut mx = w.saturating_sub(marks_w as u16 + 1);
+            for (txt, c) in marks {
+                let mut mst = st;
+                mst.fg = c;
+                mst.bold = false;
+                mx = s.put(mx + 1, y, &txt, mst);
+            }
         }
         for r in 0..l.side_h {
             s.put_char(l.tree_w, l.top + r, '│', Style::fg(primary()));
@@ -658,7 +855,7 @@ impl Editor {
                 }
             }
             if sign != 0 && sign < 4 {
-                s.put_char(l.ed_x, sy, '●', Style::fg(sev_color(sign)));
+                s.put_char(l.ed_x, sy, self.sev_icon(sign), Style::fg(sev_color(sign)));
             }
             if let Some(v) = cur_path.and_then(|p| self.dbg.has_bp(p, ly)) {
                 s.put_char(
@@ -724,7 +921,14 @@ impl Editor {
                     st = st.on(EXEC);
                 }
                 if ulm[i] != 0 {
-                    st = st.underline(sev_color(ulm[i]));
+                    st = st.undercurl(sev_color(ulm[i]));
+                }
+                if self
+                    .link
+                    .is_some_and(|(t, ll, a, e)| t == self.cur && ll == ly && i >= a && i < e)
+                {
+                    st.fg = FUNC;
+                    st = st.underline(FUNC);
                 }
                 let vis_start = start.max(b.scroll_x);
                 let vis_end = end.min(right);
@@ -742,12 +946,49 @@ impl Editor {
                 if nl_selected {
                     s.put_char(ex, sy, ' ', Style::new().on(SEL));
                 } else if ulm[line.len()] != 0 {
-                    s.put_char(ex, sy, ' ', Style::new().underline(sev_color(ulm[line.len()])));
+                    s.put_char(ex, sy, ' ', Style::new().undercurl(sev_color(ulm[line.len()])));
                 }
             }
             for h in &hints[hi..] {
                 off += put_virtual(s, l, b.scroll_x, sy, col + off, &h.text, hint_st);
             }
+            // The line's worst problem, after its text: read-only, in the
+            // problem's colour on a tint (one per line, `+N` for the others).
+            if self.settings.inline_diagnostics {
+                if let Some(ds) = diags {
+                    let mut here: Vec<&crate::lsp::Diag> =
+                        ds.iter().filter(|d| d.l0 == ly && (1..=3).contains(&d.sev)).collect();
+                    here.sort_by_key(|d| (d.sev, d.c0));
+                    if let Some(d) = here.first() {
+                        let msg = d.msg.lines().next().unwrap_or("").trim();
+                        let more = if here.len() > 1 {
+                            format!("  +{}", here.len() - 1)
+                        } else {
+                            String::new()
+                        };
+                        let text = format!(" {} {}{} ", self.sev_icon(d.sev), msg, more);
+                        let at = col + off + 3;
+                        if at >= b.scroll_x && at < right {
+                            let sx = l.text_x + (at - b.scroll_x) as u16;
+                            let st = Style::fg(sev_color(d.sev)).on(sev_bg(d.sev));
+                            put_clip(s, sx, sy, &text, st, right - at);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A problem's mark in the gutter and before its message: error ⊗,
+    /// warning ⚠, info ⓘ (codicons with `icons` on).
+    fn sev_icon(&self, sev: u8) -> char {
+        match (sev, self.settings.icons) {
+            (1, true) => icons::ERROR,
+            (2, true) => icons::WARNING,
+            (_, true) => icons::INFO,
+            (1, false) => '⊗',
+            (2, false) => '⚠',
+            _ => 'ⓘ',
         }
     }
 
@@ -867,7 +1108,15 @@ impl Editor {
                 );
                 return;
             }
-            // The right side stays while the command is short enough.
+            // A question being answered on the line (a launch's input) shows
+            // at the right; otherwise the right side stays while there's room.
+            if let Some(h) = self.cmd_hint.as_deref() {
+                let hw = text_w(h) as u16 + 1;
+                if end + 2 + hw <= s.w {
+                    s.put(s.w - hw, y, h, Style::fg(TYPE).on(BAR).italic());
+                }
+                return;
+            }
             if end + 2 + rw <= s.w {
                 s.put(s.w - rw, y, &right, bar);
             }

@@ -8,9 +8,12 @@ What's left after the wish-list rebuild (CHANGES.md, Log 2026-11-11). Ordered ro
 - [ ] Ctrl+Backspace / Ctrl+H: in terminals without kitty keys both arrive as the same byte, so one of "delete word" / "find and replace" can't be told apart. Alt+Backspace always deletes a word.
 
 ## Debugger
-- [ ] `attach` configurations in launch.json (only `launch` runs today).
-- [ ] `preLaunchTask` (needs `.vscode/tasks.json` support).
-- [ ] `${input:…}` variables (prompt on the `:` line).
+- [ ] launch.json `compounds` (several sessions at once; ren runs one), `serverReadyAction` actions `startDebugging` / `debugWithChrome` / `debugWithEdge` (ren only opens the URL), `${input:…}` of type `command` and `${command:…}` other than the process pickers and `python.interpreterPath`, `${taskVar:…}`.
+- [ ] Go with `"console": "integratedTerminal"` (vscode-go runs dlv itself in the terminal with `--client-addr`); today dlv runs in the background.
+- [ ] tasks.json: problem matchers only matter for background tasks (VS Code also counts error markers after a task, and has `debug.onTaskErrors`); tasks provided by extensions (`npm: build` without a tasks.json entry) aren't found.
+- [ ] CodeLLDB's `lldb.launch.*` VS Code settings (merged into every configuration there) aren't read; `${config:…}` only reads the project's `.vscode/settings.json`, not VS Code's user settings.
+- [ ] *(question)* `${config:…}` reads `.vscode/settings.json`: it's the only thing ren reads from VS Code's settings, for launch.json 1:1. Keep, or leave `${config:…}` unresolved?
+- [ ] Python subprocesses: `F6` (pause) and the console's expressions go to the session on screen, which is the launched program until a subprocess stops; with Flask's reloader that's the reloader, not the server. A list of sessions to pick from would fix it.
 - [ ] JS/TS/Deno debugging (`node`, `pwa-node` types): Node and Deno projects can't be debugged yet.
 - [ ] *(suggested)* Keep breakpoints and watches per project in `~/.ren/session/<workspace>/`.
 

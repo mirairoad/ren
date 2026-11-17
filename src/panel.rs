@@ -407,6 +407,37 @@ impl Editor {
         self.term_spawn(cmd, Vec::new(), &title);
     }
 
+    /// A debug adapter's `runInTerminal`: `cmd` runs in a terminal tab in
+    /// `cwd`, with `env` set (`None` = taken out). A tab of the same title
+    /// whose program has ended is reused. Returns the program's process id.
+    pub(crate) fn term_run(
+        &mut self,
+        cmd: &[String],
+        cwd: &Path,
+        env: &[(String, Option<String>)],
+        title: &str,
+    ) -> Result<u32, String> {
+        let l = self.layout();
+        let rows = if l.dbg_h > 1 { l.dbg_h - 1 } else { 12 };
+        let cols = l.dbg_w.max(20);
+        let s = term::Session::spawn_env(cmd, cwd, env, rows, cols, title).map_err(|e| e.to_string())?;
+        let pid = s.pid();
+        match self.terms.iter().position(|t| t.title == title && !t.alive()) {
+            Some(i) => {
+                self.terms[i] = s;
+                self.term_sel = i;
+            }
+            None => {
+                self.terms.push(s);
+                self.term_sel = self.terms.len() - 1;
+            }
+        }
+        self.term_err = None;
+        self.dbg.visible = true;
+        self.panel_tab = PanelTab::Terminal;
+        Ok(pid)
+    }
+
     fn term_spawn(&mut self, cmd: Vec<String>, env: Vec<(String, String)>, title: &str) {
         let l = self.layout();
         let rows = if l.dbg_h > 1 { l.dbg_h - 1 } else { 12 };
