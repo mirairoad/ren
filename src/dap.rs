@@ -31,6 +31,8 @@ pub struct Adapter {
 pub enum PlanErr {
     Missing(Tool),
     Other(String),
+    /// A value to ask for first (`${input:…}`, `${command:pickProcess}`).
+    Ask(crate::launch::Ask),
 }
 
 impl From<String> for PlanErr {
@@ -49,6 +51,8 @@ impl From<&str> for PlanErr {
 pub enum Req {
     Initialize,
     Launch,
+    /// A subprocess session's `attach` (debugpy).
+    Attach,
     SetBreakpoints(PathBuf),
     ConfigDone,
     StackTrace,
@@ -81,6 +85,7 @@ pub enum DapMsg {
     Request {
         seq: i64,
         command: String,
+        args: Value,
     },
     Closed,
 }
@@ -91,7 +96,8 @@ enum Raw {
 }
 
 pub struct Client {
-    child: Child,
+    /// The adapter's process; None for a session over another one's socket.
+    child: Option<Child>,
     writer: Box<dyn Write + Send>,
     seq: i64,
     pending: HashMap<i64, Req>,
@@ -99,6 +105,11 @@ pub struct Client {
     pub caps: Value,
     pub adapter: Adapter,
     pub closed: bool,
+    /// A subprocess's session: the `attach` arguments its adapter sent
+    /// (debugpy's `debugpyAttach` / `startDebugging`).
+    pub attach: Option<Value>,
+    /// Configured (breakpoints sent, `configurationDone`).
+    pub ready: bool,
 }
 
 fn reader(r: impl Read, tx: Sender<Raw>) {
@@ -214,7 +225,7 @@ impl Client {
             (child, Box::new(stdin))
         };
         Ok(Client {
-            child,
+            child: Some(child),
             writer,
             seq: 1,
             pending: HashMap::new(),
@@ -222,6 +233,35 @@ impl Client {
             caps: Value::Null,
             adapter,
             closed: false,
+            attach: None,
+            ready: false,
+        })
+    }
+
+    /// A session over a socket: a debug server already listening (debugpy's
+    /// `connect`, a remote `dlv`), or a subprocess's port.
+    pub fn connect(adapter: Adapter, host: &str, port: u16) -> Result<Client, String> {
+        use std::net::ToSocketAddrs;
+        let addr = (host, port)
+            .to_socket_addrs()
+            .map_err(|e| e.to_string())?
+            .next()
+            .ok_or("no address")?;
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| e.to_string())?;
+        let rs = stream.try_clone().map_err(|e| e.to_string())?;
+        let (tx, rx) = channel();
+        thread::spawn(move || reader(rs, tx));
+        Ok(Client {
+            child: None,
+            writer: Box::new(stream),
+            seq: 1,
+            pending: HashMap::new(),
+            rx,
+            caps: Value::Null,
+            adapter,
+            closed: false,
+            attach: None,
+            ready: false,
         })
     }
 
@@ -245,6 +285,19 @@ impl Client {
         self.pending.insert(seq, req);
         self.write(&json!({ "seq": seq, "type": "request", "command": command, "arguments": args }));
         seq
+    }
+
+    pub fn respond_error(&mut self, request_seq: i64, command: &str, message: &str) {
+        let seq = self.seq;
+        self.seq += 1;
+        self.write(&json!({
+            "seq": seq,
+            "type": "response",
+            "request_seq": request_seq,
+            "success": false,
+            "command": command,
+            "message": message,
+        }));
     }
 
     pub fn respond(&mut self, request_seq: i64, command: &str, body: Value) {
@@ -290,6 +343,7 @@ impl Client {
                     Some("request") => out.push(DapMsg::Request {
                         seq: v["seq"].as_i64().unwrap_or(0),
                         command: v["command"].as_str().unwrap_or("").to_string(),
+                        args: v["arguments"].clone(),
                     }),
                     _ => {}
                 },
@@ -299,15 +353,19 @@ impl Client {
     }
 
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
         self.closed = true;
     }
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill();
+        }
     }
 }
 
@@ -460,6 +518,34 @@ pub struct LaunchPlan {
     pub args: Value,
     pub cwd: PathBuf,
     pub cargo: Option<Vec<String>>,
+    /// The request sent after `initialize`: `launch` or `attach`.
+    pub request: String,
+    /// A debug server already listening (debugpy's `connect`, a remote
+    /// dlv): ren connects to it instead of starting the adapter.
+    pub connect: Option<(String, u16)>,
+    /// From launch.json: its `preLaunchTask`, `postDebugTask`, `serverReadyAction`.
+    pub pre_task: Option<String>,
+    pub post_task: Option<String>,
+    pub server_ready: Option<Value>,
+    /// ren's own plan (no launch.json): ren's own defaults apply.
+    pub auto: bool,
+}
+
+impl LaunchPlan {
+    fn auto(adapter: Adapter, args: Value, cwd: PathBuf, cargo: Option<Vec<String>>) -> Self {
+        LaunchPlan {
+            adapter,
+            args,
+            cwd,
+            cargo,
+            request: "launch".into(),
+            connect: None,
+            pre_task: None,
+            post_task: None,
+            server_ready: None,
+            auto: true,
+        }
+    }
 }
 
 pub fn launch_args(kind: Kind, program: &str, args: &[String], cwd: &Path, rust: bool) -> Value {
@@ -488,153 +574,199 @@ pub fn launch_args(kind: Kind, program: &str, args: &[String], cwd: &Path, rust:
     }
 }
 
-fn substitute(v: &Value, vars: &[(&str, String)]) -> Value {
-    match v {
-        Value::String(s) => {
-            let mut s = s.clone();
-            for (k, val) in vars {
-                s = s.replace(&format!("${{{}}}", k), val);
-            }
-            let re = regex::Regex::new(r"\$\{env:([A-Za-z0-9_]+)\}").unwrap();
-            let s = re
-                .replace_all(&s, |c: &regex::Captures| std::env::var(&c[1]).unwrap_or_default())
-                .into_owned();
-            Value::String(s)
-        }
-        Value::Array(a) => Value::Array(a.iter().map(|x| substitute(x, vars)).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), substitute(x, vars))).collect()),
-        other => other.clone(),
+/// The configurations of `.vscode/launch.json` that ren runs, in the order
+/// VS Code lists them (`launch.rs`).
+pub fn launch_configs(root: &Path) -> Vec<String> {
+    match crate::launch::read_launch(root) {
+        Some(Ok(doc)) => crate::launch::config_names(&doc),
+        _ => Vec::new(),
     }
 }
 
-/// Names of the `launch` configurations in `.vscode/launch.json` that ren can run.
-pub fn launch_configs(root: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(root.join(".vscode").join("launch.json")) else {
-        return Vec::new();
-    };
-    let Ok(doc) = serde_json::from_str::<Value>(&crate::settings::strip_jsonc(&text)) else {
-        return Vec::new();
-    };
-    doc["configurations"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|c| c["request"].as_str() == Some("launch"))
-        .filter(|c| {
-            matches!(
-                c["type"].as_str().unwrap_or(""),
-                "lldb" | "codelldb" | "lldb-dap" | "lldb-vscode" | "cppdbg" | "gdb" | "debugpy" | "python" | "go"
-            )
-        })
-        .map(|c| c["name"].as_str().unwrap_or("(unnamed)").to_string())
-        .collect()
-}
-
-/// The plan for the configuration called `name` (or the first runnable one).
+/// The plan for the configuration called `name` (or the first ren runs),
+/// resolved as VS Code and the debugger's extension would (`launch.rs`).
+/// None when there's no launch.json or nothing in it ren runs.
 pub fn from_launch_json(
-    root: &Path,
-    file: Option<&Path>,
+    ctx: &crate::launch::Ctx,
     allow_install: bool,
     name: Option<&str>,
 ) -> Option<Result<LaunchPlan, PlanErr>> {
-    let text = std::fs::read_to_string(root.join(".vscode").join("launch.json")).ok()?;
-    let doc: Value = serde_json::from_str(&crate::settings::strip_jsonc(&text)).ok()?;
-    let file_s = file.map(|f| f.display().to_string()).unwrap_or_default();
-    let dir_s = file
-        .and_then(|f| f.parent())
-        .map(|d| d.display().to_string())
-        .unwrap_or_default();
-    let stem = file
-        .and_then(|f| f.file_stem())
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let base = file
-        .and_then(|f| f.file_name())
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let vars = [
-        ("workspaceFolder", root.display().to_string()),
-        ("workspaceRoot", root.display().to_string()),
-        ("file", file_s),
-        ("fileDirname", dir_s),
-        ("fileBasenameNoExtension", stem),
-        ("fileBasename", base),
-        ("pathSeparator", std::path::MAIN_SEPARATOR.to_string()),
-        (
-            "workspaceFolderBasename",
-            root.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        ),
-        (
-            "userHome",
-            crate::settings::home()
-                .map(|h| h.display().to_string())
-                .unwrap_or_default(),
-        ),
-        ("cwd", root.display().to_string()),
-    ];
-    for cfg in doc["configurations"].as_array()? {
-        if cfg["request"].as_str() != Some("launch") {
-            continue;
+    use crate::launch::Subst;
+    let doc = match crate::launch::read_launch(&ctx.root)? {
+        Ok(d) => d,
+        Err(e) => return Some(Err(e.into())),
+    };
+    let raw = crate::launch::config(&doc, name)?;
+    let cfg = match crate::launch::substitute(&raw, ctx, &doc["inputs"]) {
+        Ok(v) => v,
+        Err(Subst::Ask(a)) => return Some(Err(PlanErr::Ask(a))),
+        Err(Subst::Error(e)) => return Some(Err(e.into())),
+    };
+    Some(plan_for(cfg, ctx, allow_install))
+}
+
+/// debugpy's adapter, run by `py` (the configuration's `debugAdapterPython`)
+/// when given, with ren's downloaded debugpy when that Python has none.
+fn python_adapter_with(
+    root: &Path,
+    py: Option<&str>,
+    adapter_path: Option<&str>,
+    log: bool,
+) -> Result<Adapter, PlanErr> {
+    let Some(py) = py.map(PathBuf::from).filter(|p| p.is_file()) else {
+        return python_adapter(root);
+    };
+    let mut cmd = vec![py.display().to_string()];
+    match adapter_path {
+        Some(p) => cmd.push(p.to_string()),
+        None => cmd.extend(["-m".to_string(), "debugpy.adapter".to_string()]),
+    }
+    if log {
+        if let Some(d) = crate::settings::dir() {
+            cmd.extend(["--log-dir".to_string(), d.join("logs").display().to_string()]);
         }
-        if name.is_some_and(|n| cfg["name"].as_str() != Some(n)) {
-            continue;
-        }
-        let cfg = substitute(cfg, &vars);
-        let ty = cfg["type"].as_str().unwrap_or("");
-        let adapter = match ty {
-            "lldb" | "codelldb" => native_adapter(Some(Kind::CodeLldb), allow_install),
-            "lldb-dap" | "lldb-vscode" => native_adapter(Some(Kind::Lldb), allow_install),
-            "cppdbg" => {
-                let prefer = if cfg["MIMode"].as_str() == Some("lldb") {
-                    Kind::Lldb
-                } else {
-                    Kind::Gdb
-                };
-                native_adapter(Some(prefer), allow_install)
+    }
+    let mut a = adapter(Kind::Debugpy, "debugpy", cmd);
+    if adapter_path.is_none() && !quiet(&py, &["-c", "import debugpy"]) {
+        let Some(dir) = tools::debugpy_dir() else {
+            return Err(PlanErr::Missing(Tool::Debugpy));
+        };
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let mut pp = dir.display().to_string();
+        if let Ok(old) = std::env::var("PYTHONPATH") {
+            if !old.is_empty() {
+                pp = format!("{}{}{}", pp, sep, old);
             }
-            "gdb" => native_adapter(Some(Kind::Gdb), allow_install),
-            "debugpy" | "python" => python_adapter(root),
-            "go" => go_adapter(),
-            _ => continue,
-        };
-        let adapter = match adapter {
-            Ok(a) => a,
-            Err(e) => return Some(Err(e)),
-        };
-        let cwd = cfg["cwd"]
-            .as_str()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.to_path_buf());
-        let program = cfg["program"].as_str().unwrap_or("").to_string();
-        let args: Vec<String> = cfg["args"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|a| a.as_str().map(|s| s.to_string()))
-            .collect();
-        let cargo = cfg["cargo"]["args"].as_array().map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        });
-        let mut largs = launch_args(adapter.kind, &program, &args, &cwd, cargo.is_some());
-        if let (Some(dst), Some(src)) = (largs.as_object_mut(), cfg.as_object()) {
-            for (k, v) in src {
-                if !matches!(k.as_str(), "name" | "type" | "request" | "cargo" | "preLaunchTask") {
-                    dst.insert(k.clone(), v.clone());
+        }
+        a.env.push(("PYTHONPATH".into(), pp));
+    }
+    Ok(a)
+}
+
+fn plan_for(cfg: Value, ctx: &crate::launch::Ctx, allow_install: bool) -> Result<LaunchPlan, PlanErr> {
+    use crate::launch;
+    let root = ctx.root.as_path();
+    let mut cfg: launch::Obj = cfg.as_object().cloned().unwrap_or_default();
+    let ty = cfg.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    let request = match cfg.get("request").and_then(Value::as_str) {
+        Some("attach") => "attach",
+        _ => "launch",
+    }
+    .to_string();
+    let text = |cfg: &launch::Obj, k: &str| cfg.get(k).and_then(Value::as_str).map(str::to_string);
+    let on = |cfg: &launch::Obj, k: &str| cfg.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let pre_task = text(&cfg, "preLaunchTask");
+    let post_task = text(&cfg, "postDebugTask");
+    let server_ready = cfg.get("serverReadyAction").cloned();
+    let process: Vec<(String, String)> = std::env::vars().collect();
+    let mut connect = None;
+    let mut cargo = None;
+    let mut cwd = root.to_path_buf();
+    let adapter = match ty.as_str() {
+        "debugpy" | "python" => {
+            let interp = ctx
+                .python
+                .clone()
+                .or_else(|| find_python(root).map(|p| p.display().to_string()))
+                .unwrap_or_else(|| "python3".into());
+            if request == "attach" {
+                launch::python_attach(&mut cfg, root);
+                // `connect` (or the older `host` / `port`): debugpy is already
+                // listening there, so that's the adapter.
+                let port = cfg["connect"]["port"]
+                    .as_u64()
+                    .or(cfg.get("port").and_then(Value::as_u64));
+                match port {
+                    Some(port) => {
+                        let host = match cfg.get("connect") {
+                            Some(c) => c["host"].as_str(),
+                            None => cfg.get("host").and_then(Value::as_str),
+                        }
+                        .unwrap_or("127.0.0.1")
+                        .to_string();
+                        connect = Some((host, port as u16));
+                        adapter(Kind::Debugpy, "debugpy", Vec::new())
+                    }
+                    None => python_adapter_with(
+                        root,
+                        Some(&interp),
+                        text(&cfg, "debugAdapterPath").as_deref(),
+                        on(&cfg, "logToFile"),
+                    )?,
+                }
+            } else {
+                launch::python_launch(&mut cfg, root, &interp, &process);
+                python_adapter_with(
+                    root,
+                    cfg.get("debugAdapterPython").and_then(Value::as_str),
+                    text(&cfg, "debugAdapterPath").as_deref(),
+                    on(&cfg, "logToFile"),
+                )?
+            }
+        }
+        "lldb" | "codelldb" => {
+            launch::codelldb(&mut cfg, root);
+            if let Some(a) = cfg.remove("cargo") {
+                let args: Vec<String> = a["args"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect();
+                let mut langs = cfg
+                    .get("sourceLanguages")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if !langs.iter().any(|l| l == "rust") {
+                    langs.push(json!("rust"));
+                }
+                cfg.insert("sourceLanguages".into(), Value::Array(langs));
+                cargo = Some(args);
+            }
+            native_adapter(Some(Kind::CodeLldb), allow_install)?
+        }
+        "lldb-dap" | "lldb-vscode" => native_adapter(Some(Kind::Lldb), allow_install)?,
+        "gdb" => native_adapter(Some(Kind::Gdb), allow_install)?,
+        "cppdbg" => {
+            let (lldb, mut args, gdb_extra) = launch::cppdbg(&cfg, root, &process)?;
+            let mut a = native_adapter(Some(if lldb { Kind::Lldb } else { Kind::Gdb }), allow_install)?;
+            if a.kind == Kind::Gdb {
+                a.cmd.extend(gdb_extra);
+            }
+            for k in ["name", "type", "request"] {
+                if let Some(v) = cfg.get(k) {
+                    args.insert(k.into(), v.clone());
                 }
             }
+            cfg = args;
+            a
         }
-        return Some(Ok(LaunchPlan {
-            adapter,
-            args: largs,
-            cwd,
-            cargo,
-        }));
-    }
-    None
+        "go" => {
+            let extra = launch::go(&mut cfg, root, ctx.file.as_deref())?;
+            let mut a = go_adapter()?;
+            let at = a.cmd.len().min(2);
+            a.cmd.splice(at..at, extra.dlv_args);
+            if let Some(d) = extra.build_dir {
+                cwd = d;
+            }
+            connect = extra.connect;
+            a
+        }
+        other => return Err(format!("ren can't debug type \"{}\"", other).into()),
+    };
+    Ok(LaunchPlan {
+        adapter,
+        args: Value::Object(cfg),
+        cwd,
+        cargo,
+        request,
+        connect,
+        pre_task,
+        post_task,
+        server_ready,
+        auto: false,
+    })
 }
 
 pub fn auto_plan(
@@ -653,12 +785,12 @@ pub fn auto_plan(
             let prog = program
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| file.display().to_string());
-            Ok(LaunchPlan {
-                args: launch_args(a.kind, &prog, args, &cwd, false),
-                adapter: a,
+            Ok(LaunchPlan::auto(
+                a.clone(),
+                launch_args(a.kind, &prog, args, &cwd, false),
                 cwd,
-                cargo: None,
-            })
+                None,
+            ))
         }
         "Go" => {
             let a = go_adapter()?;
@@ -666,30 +798,30 @@ pub fn auto_plan(
             let prog = program
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| file.parent().unwrap_or(&cwd).display().to_string());
-            Ok(LaunchPlan {
-                args: launch_args(a.kind, &prog, args, &cwd, false),
-                adapter: a,
+            Ok(LaunchPlan::auto(
+                a.clone(),
+                launch_args(a.kind, &prog, args, &cwd, false),
                 cwd,
-                cargo: None,
-            })
+                None,
+            ))
         }
         "Rust" | "C/C++" => {
             let prefer = if rust { Some(Kind::CodeLldb) } else { None };
             let a = native_adapter(prefer, allow_install)?;
             let cwd = find_root(lang, file, workspace);
             match program {
-                Some(p) => Ok(LaunchPlan {
-                    args: launch_args(a.kind, p, args, &cwd, rust),
-                    adapter: a,
+                Some(p) => Ok(LaunchPlan::auto(
+                    a.clone(),
+                    launch_args(a.kind, p, args, &cwd, rust),
                     cwd,
-                    cargo: None,
-                }),
-                None if rust => Ok(LaunchPlan {
-                    args: launch_args(a.kind, "", args, &cwd, true),
-                    adapter: a,
+                    None,
+                )),
+                None if rust => Ok(LaunchPlan::auto(
+                    a.clone(),
+                    launch_args(a.kind, "", args, &cwd, true),
                     cwd,
-                    cargo: Some(vec!["build".into()]),
-                }),
+                    Some(vec!["build".into()]),
+                )),
                 None => Err("set the program to debug: :debug <program> [args]".into()),
             }
         }
@@ -787,18 +919,4 @@ pub fn cargo_build(cwd: PathBuf, mut args: Vec<String>, current: Option<PathBuf>
         let _ = tx.send(res);
     });
     rx
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn subst() {
-        let v = substitute(
-            &json!({ "p": "${workspaceFolder}/a" }),
-            &[("workspaceFolder", "/w".into())],
-        );
-        assert_eq!(v["p"], "/w/a");
-    }
 }

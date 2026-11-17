@@ -965,8 +965,11 @@ impl Editor {
     /// 2 when only warnings. Folders take the worst of what's inside them, so a
     /// collapsed folder still shows that something in it is broken.
     /// Includes what the project scan found in files no server watches.
-    pub(crate) fn problem_marks(&self) -> HashMap<String, u8> {
-        problem_marks(&self.lsp.diags, self.scan_found())
+    /// Errors and warnings per file, and for each folder the sum of what's in
+    /// it (`path_key` → (errors, warnings)). Includes what the project scan
+    /// found in files no server watches.
+    pub(crate) fn problem_counts(&self) -> HashMap<String, (u32, u32)> {
+        problem_counts(&self.lsp.diags, self.scan_found())
     }
 
     pub fn diag_at_cursor(&self) -> Option<(u8, String)> {
@@ -2567,19 +2570,27 @@ impl Editor {
 }
 
 /// See `Editor::problem_marks`.
-fn problem_marks(diags: &HashMap<String, Vec<Diag>>, scanned: Vec<(&String, u8)>) -> HashMap<String, u8> {
-    let mut marks: HashMap<String, u8> = HashMap::new();
-    let served = diags.iter().filter_map(|(key, ds)| {
-        let sev = ds.iter().map(|d| d.sev).filter(|s| (1..=2).contains(s)).min()?;
-        Some((key, sev))
+fn problem_counts(
+    diags: &HashMap<String, Vec<Diag>>,
+    scanned: Vec<(&String, (u32, u32))>,
+) -> HashMap<String, (u32, u32)> {
+    let mut out: HashMap<String, (u32, u32)> = HashMap::new();
+    let served = diags.iter().map(|(key, ds)| {
+        let e = ds.iter().filter(|d| d.sev == 1).count() as u32;
+        let w = ds.iter().filter(|d| d.sev == 2).count() as u32;
+        (key, (e, w))
     });
-    for (key, sev) in served.chain(scanned) {
+    for (key, (e, w)) in served.chain(scanned) {
+        if e + w == 0 {
+            continue;
+        }
         for p in Path::new(key).ancestors() {
-            let m = marks.entry(path_key(p)).or_insert(sev);
-            *m = (*m).min(sev);
+            let m = out.entry(path_key(p)).or_default();
+            m.0 += e;
+            m.1 += w;
         }
     }
-    marks
+    out
 }
 
 #[cfg(test)]
@@ -2587,7 +2598,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn problem_marks_take_the_worst() {
+    fn problem_counts_add_up() {
         let d = |sev: u8| Diag {
             server: "Rust",
             l0: 0,
@@ -2600,25 +2611,25 @@ mod tests {
             enc: Enc::Utf16,
         };
         let mut diags = HashMap::new();
-        diags.insert("/p/src/a.rs".to_string(), vec![d(2), d(1)]); // both: error
-        diags.insert("/p/src/b.rs".to_string(), vec![d(2), d(3)]); // warning
+        diags.insert("/p/src/a.rs".to_string(), vec![d(2), d(1), d(1)]);
+        diags.insert("/p/src/b.rs".to_string(), vec![d(2), d(3)]);
         diags.insert("/p/lib/c.rs".to_string(), vec![d(3), d(4)]); // info/hint only
         diags.insert("/p/lib/d.rs".to_string(), vec![]);
         diags.insert("/p/doc/e.rs".to_string(), vec![d(2)]);
-        let m = problem_marks(&diags, Vec::new());
-        assert_eq!(m.get("/p/src/a.rs"), Some(&1));
-        assert_eq!(m.get("/p/src/b.rs"), Some(&2));
+        let m = problem_counts(&diags, Vec::new());
+        assert_eq!(m.get("/p/src/a.rs"), Some(&(2, 1)));
+        assert_eq!(m.get("/p/src/b.rs"), Some(&(0, 1)));
         assert_eq!(m.get("/p/lib/c.rs"), None);
         assert_eq!(m.get("/p/lib"), None);
-        // Folders take the worst inside them.
-        assert_eq!(m.get("/p/src"), Some(&1));
-        assert_eq!(m.get("/p/doc"), Some(&2));
-        assert_eq!(m.get("/p"), Some(&1));
-        // A checker's findings count too, and the worst still wins.
-        let (x, y) = ("/p/lib/x.py".to_string(), "/p/src/b.rs".to_string());
-        let m = problem_marks(&diags, vec![(&x, 2), (&y, 1)]);
-        assert_eq!(m.get("/p/lib"), Some(&2));
-        assert_eq!(m.get("/p/src/b.rs"), Some(&1));
+        // Folders add up what's inside them.
+        assert_eq!(m.get("/p/src"), Some(&(2, 2)));
+        assert_eq!(m.get("/p/doc"), Some(&(0, 1)));
+        assert_eq!(m.get("/p"), Some(&(2, 3)));
+        // A checker's findings count too.
+        let x = "/p/lib/x.py".to_string();
+        let m = problem_counts(&diags, vec![(&x, (1, 4))]);
+        assert_eq!(m.get("/p/lib"), Some(&(1, 4)));
+        assert_eq!(m.get("/p"), Some(&(3, 7)));
     }
 
     fn kind(lsp: Option<u64>, label: &str, line: &str, x: usize) -> &'static str {

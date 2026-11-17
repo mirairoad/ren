@@ -11,6 +11,11 @@ const GREY: Color = rgb(0x8a, 0x93, 0xa3);
 
 pub const FOLDER: (char, Color) = ('\u{f07b}', rgb(0x7f, 0xa8, 0xd8));
 pub const FOLDER_OPEN: (char, Color) = ('\u{f07c}', rgb(0x7f, 0xa8, 0xd8));
+/// Codicons (Nerd Fonts' `nf-cod-*`): error, warning, info, search.
+pub const ERROR: char = '\u{ea87}';
+pub const WARNING: char = '\u{ea6c}';
+pub const INFO: char = '\u{ea74}';
+pub const SEARCH: char = '\u{ea6d}';
 
 /// Icon and colour for a file name.
 pub fn file(name: &str) -> (char, Color) {

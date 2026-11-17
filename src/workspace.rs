@@ -1,7 +1,7 @@
 //! Workspace files: `<name>.workspace.json` lists folders that open together,
 //! `{ "open": ["/work/api", "~/work/web", "../shared"] }` (comments and
-//! trailing commas allowed; `~/` is home, a relative path starts from the
-//! file's folder).
+//! trailing commas allowed, and JavaScript's `{ open: ['/a', '/b'] }` too;
+//! `~/` is home, a relative path starts from the file's folder).
 //!
 //! `ren name.workspace.json` (or `:workspace open`) opens every folder as a
 //! project and brings back where the workspace was left: the window's session
@@ -82,9 +82,93 @@ fn resolve_entry(base: &Path, s: &str) -> PathBuf {
     fs::canonicalize(&p).unwrap_or(p)
 }
 
-/// The file's JSON, comments and trailing commas allowed.
+/// The file's JSON: comments and trailing commas allowed, and when that
+/// doesn't read, JavaScript's bare keys and 'single quotes'.
 fn parse_json(text: &str) -> Result<Value, String> {
-    serde_json::from_str(&crate::settings::strip_jsonc(text)).map_err(|e| format!("not valid JSON ({})", e))
+    let read = |t: &str| serde_json::from_str::<Value>(&crate::settings::strip_jsonc(t));
+    read(text)
+        .or_else(|e| read(&relax(text)).map_err(|_| e))
+        .map_err(|e| format!("not valid JSON ({})", e))
+}
+
+/// JavaScript object text as JSON: `'single quotes'` become `"double"` and
+/// bare keys (`open:`) get quotes. "Strings" and comments stay as they are,
+/// so valid JSON comes out unchanged.
+fn relax(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '"' => {
+                let start = i;
+                i += 1;
+                while i < c.len() && c[i] != '"' {
+                    i += if c[i] == '\\' { 2 } else { 1 };
+                }
+                i = (i + 1).min(c.len());
+                out.extend(&c[start..i]);
+            }
+            '\'' => {
+                out.push('"');
+                i += 1;
+                while i < c.len() && c[i] != '\'' {
+                    match c[i] {
+                        '\\' if i + 1 < c.len() => {
+                            if c[i + 1] != '\'' {
+                                out.push('\\');
+                            }
+                            out.push(c[i + 1]);
+                            i += 1;
+                        }
+                        '"' => out.push_str("\\\""),
+                        ch => out.push(ch),
+                    }
+                    i += 1;
+                }
+                out.push('"');
+                i += 1;
+            }
+            '/' if c.get(i + 1) == Some(&'/') => {
+                while i < c.len() && c[i] != '\n' {
+                    out.push(c[i]);
+                    i += 1;
+                }
+            }
+            '/' if c.get(i + 1) == Some(&'*') => {
+                let start = i;
+                i += 2;
+                while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(c.len());
+                out.extend(&c[start..i]);
+            }
+            ch if ch.is_alphabetic() || ch == '_' || ch == '$' => {
+                let start = i;
+                while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '$') {
+                    i += 1;
+                }
+                let word: String = c[start..i].iter().collect();
+                let mut j = i;
+                while j < c.len() && c[j].is_whitespace() {
+                    j += 1;
+                }
+                if c.get(j) == Some(&':') {
+                    out.push('"');
+                    out.push_str(&word);
+                    out.push('"');
+                } else {
+                    out.push_str(&word);
+                }
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn parse(text: &str, base: &Path) -> Result<Listed, String> {
@@ -304,8 +388,9 @@ impl Editor {
             .map(|s| s.id.clone());
         let elsewhere = id.is_none() && session::workspace_live(&file);
         self.workspace = Some(file.clone());
-        let (opened, tabs, unsaved) = self.open_folders_with(&listed.paths(), id.as_deref());
-        let projects = match opened {
+        let (_, tabs, unsaved) = self.open_folders_with(&listed.paths(), id.as_deref());
+        // Counted from the file: some of its folders may have been open already.
+        let projects = match listed.folders.len() {
             1 => "1 project".to_string(),
             n => format!("{} projects", n),
         };
@@ -333,6 +418,33 @@ impl Editor {
         } else {
             self.error(format!("{} · not found: {}", msg, listed.missing.join(", ")));
         }
+    }
+
+    /// `ren new.workspace.json` for a file that isn't there yet: its tab
+    /// (unsaved) gets a starting point listing the folder ren started in.
+    pub fn start_workspace_file(&mut self) {
+        let b = self.buf();
+        let Some(path) = b.path.clone() else { return };
+        if !is_workspace_file(&path) || path.exists() || b.lines.len() > 1 || !b.lines[0].is_empty() {
+            return;
+        }
+        let here = env::current_dir().map(|d| tilde(&d)).unwrap_or_else(|_| "~".into());
+        let entry = serde_json::to_string(&here).unwrap_or_default();
+        let text = format!(
+            "{{\n  // Folders to open together: absolute, ~/… (home), or relative to this file.\n  \"open\": [\n    {}\n  ]\n}}\n",
+            entry
+        );
+        let b = self.buf_mut();
+        b.set_text(&text);
+        b.touch();
+        b.cy = 3;
+        b.cx = b.lines[3].len();
+        b.sync_want();
+        self.focus = Focus::Editor;
+        self.info(format!(
+            "New workspace {}: list its folders, save (Ctrl+S), then :workspace open",
+            workspace_name(&path)
+        ));
     }
 
     /// A workspace file that can't be used opens as text, to fix it.
@@ -406,7 +518,8 @@ impl Editor {
         let n = items.len();
         items.extend(listed.missing.iter().cloned());
         let text = match &old {
-            Some(t) => match with_open(t, &items) {
+            // Written back as JSON, when it was JavaScript-style.
+            Some(t) => match with_open(&relax(t), &items) {
                 Some(t) => t,
                 None => return self.error(format!("{} isn't a JSON object", tilde(&file))),
             },
@@ -619,6 +732,21 @@ mod tests {
         assert!(parse("{\"open\": [1]}", &base).is_err());
         assert!(parse("{\"open\": [", &base).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn javascript_style() {
+        let js = "{open:['/a', \"/b\", 'it\\'s', 'say \"hi\"'], // team's\n x_1 : true, /* 'c' */ n: 1e5}";
+        let v = parse_json(js).unwrap();
+        assert_eq!(v["open"], serde_json::json!(["/a", "/b", "it's", "say \"hi\""]));
+        assert_eq!(v["x_1"], serde_json::json!(true));
+        // Valid JSON(C) comes through unchanged.
+        let ok = "{\n  // team's repos\n  \"open\": [\"/a\", \"it's: x\"], /* k: 'v' */\n  \"n\": -1.5e3\n}";
+        assert_eq!(relax(ok), ok);
+        // Saving JavaScript-style text writes JSON, keeping the comment.
+        let out = with_open(&relax("{ // mine\n open: ['/old'] }"), &["/new".to_string()]).unwrap();
+        assert_eq!(out, "{ // mine\n \"open\": [\"/new\"] }");
+        assert!(parse_json("{open: ['/a'").is_err());
     }
 
     #[test]

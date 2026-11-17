@@ -45,6 +45,8 @@ pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub ul: Option<Color>,
+    /// The underline is wavy (`ESC[4:3m`), as editors mark problems.
+    pub curly: bool,
 }
 
 impl Style {
@@ -55,6 +57,7 @@ impl Style {
             bold: false,
             italic: false,
             ul: None,
+            curly: false,
         }
     }
     pub const fn fg(c: Color) -> Self {
@@ -64,6 +67,7 @@ impl Style {
             bold: false,
             italic: false,
             ul: None,
+            curly: false,
         }
     }
     pub const fn on(mut self, c: Color) -> Self {
@@ -80,6 +84,12 @@ impl Style {
     }
     pub const fn underline(mut self, c: Color) -> Self {
         self.ul = Some(c);
+        self.curly = false;
+        self
+    }
+    pub const fn undercurl(mut self, c: Color) -> Self {
+        self.ul = Some(c);
+        self.curly = true;
         self
     }
 }
@@ -213,7 +223,12 @@ impl Screen {
                         queue!(out, SetAttribute(Attribute::Italic))?;
                     }
                     if let Some(c) = st.ul {
-                        queue!(out, SetAttribute(Attribute::Underlined), SetUnderlineColor(fix(c)))?;
+                        let kind = if st.curly {
+                            Attribute::Undercurled
+                        } else {
+                            Attribute::Underlined
+                        };
+                        queue!(out, SetAttribute(kind), SetUnderlineColor(fix(c)))?;
                     }
                     cur = Some(st);
                 }

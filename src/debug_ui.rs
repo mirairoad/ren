@@ -14,6 +14,8 @@ use std::sync::mpsc::Receiver;
 pub enum DbgState {
     Idle,
     Installing,
+    /// Waiting for the configuration's `preLaunchTask`.
+    Task,
     Building,
     Starting,
     Running,
@@ -71,7 +73,12 @@ pub struct VarNode {
 }
 
 pub struct Debugger {
+    /// The session the panel shows and steps.
     pub client: Option<Client>,
+    /// Sessions in the background: subprocesses (debugpy attaches each one the
+    /// program starts, e.g. Flask's reloader), and the launched program while
+    /// a subprocess is shown. One that stops comes on screen.
+    others: Vec<Client>,
     pub state: DbgState,
     pub bps: BTreeMap<String, (PathBuf, BTreeSet<usize>)>,
     pub unverified: HashSet<(String, usize)>,
@@ -104,15 +111,33 @@ pub struct Debugger {
     install: Option<(Tool, Receiver<Progress>, bool)>,
     pub progress: String,
     install_failed: HashSet<Tool>,
-    keep_console: bool,
+    pub(crate) keep_console: bool,
     /// The `launch.json` configuration picked in the Debug tab (remembered).
     pub config: Option<String>,
+    /// `${input:…}` / `${command:…}` answered for the launch being prepared,
+    /// and the last answer to each prompt (offered next time).
+    pub(crate) answers: std::collections::HashMap<String, String>,
+    pub(crate) last_answers: std::collections::HashMap<String, String>,
+    /// What's being asked (its key in `answers`), and whether it's a password.
+    pub(crate) asking: Option<(String, bool)>,
+    /// `preLaunchTask` / `postDebugTask` running (`debug_run.rs`).
+    pub(crate) tasks: Option<crate::editor::debug_run::TaskRun>,
+    /// A plan waiting for its `preLaunchTask` (or kept after it failed, for
+    /// `:debug anyway`).
+    pub(crate) pending: Option<LaunchPlan>,
+    /// The running session's `postDebugTask`.
+    pub(crate) post_task: Option<String>,
+    /// The running session's `serverReadyAction`.
+    pub(crate) ready: Option<crate::editor::debug_run::ServerReady>,
+    /// The terminal a `runInTerminal` started (its process id).
+    pub(crate) debug_term: Option<u32>,
 }
 
 impl Debugger {
     pub fn new() -> Self {
         Debugger {
             client: None,
+            others: Vec::new(),
             state: DbgState::Idle,
             bps: BTreeMap::new(),
             unverified: HashSet::new(),
@@ -147,6 +172,14 @@ impl Debugger {
             install_failed: HashSet::new(),
             keep_console: false,
             config: None,
+            answers: Default::default(),
+            last_answers: Default::default(),
+            asking: None,
+            tasks: None,
+            pending: None,
+            post_task: None,
+            ready: None,
+            debug_term: None,
         }
     }
 
@@ -154,7 +187,7 @@ impl Debugger {
         self.state != DbgState::Idle
     }
 
-    fn log(&mut self, s: &str, kind: u8) {
+    pub(crate) fn log(&mut self, s: &str, kind: u8) {
         let mut parts = s.split('\n').peekable();
         if self.partial && kind < 2 {
             if let (Some(first), Some(last)) = (parts.peek(), self.console.last_mut()) {
@@ -196,18 +229,53 @@ impl Debugger {
         }
     }
 
+    /// A file's breakpoints, to the session on screen and to the configured
+    /// ones in the background.
     fn send_bps(&mut self, key: &str) {
         let Some((path, lines)) = self.bps.get(key).cloned() else {
             return;
         };
-        let bps: Vec<Value> = lines.iter().map(|l| json!({ "line": l + 1 })).collect();
-        let args = json!({
-            "source": { "path": path.display().to_string(), "name": path.file_name().map(|n| n.to_string_lossy().into_owned()) },
-            "breakpoints": bps,
-            "lines": lines.iter().map(|l| l + 1).collect::<Vec<_>>(),
-        });
-        self.req("setBreakpoints", args, Req::SetBreakpoints(path));
+        if let Some(c) = self.client.as_mut() {
+            file_bps(c, &path, &lines);
+        }
+        for c in self.others.iter_mut().filter(|c| c.ready) {
+            file_bps(c, &path, &lines);
+        }
     }
+}
+
+fn file_bps(c: &mut Client, path: &Path, lines: &BTreeSet<usize>) {
+    let bps: Vec<Value> = lines.iter().map(|l| json!({ "line": l + 1 })).collect();
+    let args = json!({
+        "source": { "path": path.display().to_string(), "name": path.file_name().map(|n| n.to_string_lossy().into_owned()) },
+        "breakpoints": bps,
+        "lines": lines.iter().map(|l| l + 1).collect::<Vec<_>>(),
+    });
+    c.request("setBreakpoints", args, Req::SetBreakpoints(path.to_path_buf()));
+}
+
+fn init_args(adapter: &str) -> Value {
+    json!({
+        "clientID": "ren",
+        "clientName": "ren",
+        "adapterID": adapter,
+        "pathFormat": "path",
+        "linesStartAt1": true,
+        "columnsStartAt1": true,
+        "supportsVariableType": true,
+        "supportsVariablePaging": false,
+        "supportsRunInTerminalRequest": true,
+        "supportsArgsCanBeInterpretedByShell": true,
+        "locale": "en",
+    })
+}
+
+/// What became of a background session after one of its messages.
+enum Bg {
+    Stays,
+    Gone,
+    /// It stopped and is now the one on screen.
+    Shown,
 }
 
 impl Editor {
@@ -239,17 +307,31 @@ impl Editor {
         }
     }
 
+    /// F5: a fresh launch (inputs are asked again).
     pub(crate) fn debug_start(&mut self) {
+        if self.dbg.state == DbgState::Idle {
+            self.dbg.answers.clear();
+            self.dbg.asking = None;
+        }
+        self.debug_go();
+    }
+
+    /// Prepares the launch: the configuration resolved (asking for inputs
+    /// first), its `preLaunchTask`, then the session.
+    pub(crate) fn debug_go(&mut self) {
         match self.dbg.state {
             DbgState::Stopped => return self.debug_step("continue"),
-            DbgState::Running | DbgState::Building | DbgState::Starting | DbgState::Installing => return,
+            DbgState::Running | DbgState::Building | DbgState::Starting | DbgState::Installing | DbgState::Task => {
+                return
+            }
             DbgState::Idle => {}
         }
-        let Some(file) = self.buf().path.clone() else {
-            return self.error("Open a file to debug");
-        };
         let root = self.tree.root.clone();
         let configs = launch_configs(&root);
+        let file = self.buf().path.clone();
+        if file.is_none() && configs.is_empty() {
+            return self.error("Open a file to debug");
+        }
         if self.dbg.config.as_ref().is_some_and(|c| !configs.contains(c)) {
             self.dbg.config = None;
         }
@@ -259,13 +341,18 @@ impl Editor {
         let lang = self.buf().lang.name;
         let mut allow = true;
         let chosen = self.dbg.config.clone();
+        let ctx = self.debug_ctx();
         let plan = loop {
-            let r = match from_launch_json(&root, Some(&file), allow, chosen.as_deref()) {
+            let r = match from_launch_json(&ctx, allow, chosen.as_deref()) {
                 Some(r) => r,
-                None => auto_plan(lang, &file, &root, self.dbg.program.as_deref(), &self.dbg.args, allow),
+                None => match &file {
+                    Some(f) => auto_plan(lang, f, &root, self.dbg.program.as_deref(), &self.dbg.args, allow),
+                    None => return self.error("Open a file to debug"),
+                },
             };
             match r {
                 Ok(p) => break p,
+                Err(PlanErr::Ask(a)) => return self.ask(a),
                 Err(PlanErr::Missing(t)) if allow && t == Tool::CodeLldb && self.dbg.install_failed.contains(&t) => {
                     allow = false;
                 }
@@ -282,6 +369,16 @@ impl Editor {
                 Err(PlanErr::Other(e)) => return self.error(e),
             }
         };
+        if let Some(t) = plan.pre_task.clone() {
+            return self.run_pre_task(&t, plan);
+        }
+        self.go_plan(plan);
+    }
+
+    /// The session starts: the console cleared, a Rust build first when the
+    /// plan needs one.
+    pub(crate) fn go_plan(&mut self, plan: LaunchPlan) {
+        let file = self.buf().path.clone();
         if !std::mem::take(&mut self.dbg.keep_console) {
             self.dbg.console.clear();
         }
@@ -293,7 +390,7 @@ impl Editor {
         if let Some(cargo) = plan.cargo.clone() {
             self.dbg.log(&format!("$ cargo {}", cargo.join(" ")), 2);
             self.dbg.state = DbgState::Building;
-            self.dbg.build = Some(cargo_build(plan.cwd.clone(), cargo, Some(file)));
+            self.dbg.build = Some(cargo_build(plan.cwd.clone(), cargo, file));
             self.dbg.plan = Some(plan);
             self.info("Building…");
         } else {
@@ -374,26 +471,33 @@ impl Editor {
     }
 
     fn launch_plan(&mut self, plan: LaunchPlan) {
-        self.dbg.log(&format!("starting {}…", plan.adapter.name), 2);
         self.dbg.generation += 1;
-        match Client::start(plan.adapter.clone(), &plan.cwd) {
+        let started = match &plan.connect {
+            Some((host, port)) => {
+                self.dbg.log(&format!("connecting to {}:{}…", host, port), 2);
+                Client::connect(plan.adapter.clone(), host, *port)
+            }
+            None => {
+                self.dbg.log(&format!("starting {}…", plan.adapter.name), 2);
+                Client::start(plan.adapter.clone(), &plan.cwd)
+            }
+        };
+        self.dbg.post_task = plan.post_task.clone();
+        self.dbg.ready = plan
+            .server_ready
+            .as_ref()
+            .and_then(crate::editor::debug_run::ServerReady::new);
+        self.dbg.debug_term = None;
+        match started {
             Ok(c) => {
-                self.dbg.skip_entry = plan.adapter.kind == crate::dap::Kind::Gdb
+                // ren's own plan stops gdb at main to set breakpoints, then
+                // goes on; a launch.json's stop is the user's.
+                self.dbg.skip_entry = plan.auto
+                    && plan.adapter.kind == crate::dap::Kind::Gdb
                     && plan.args["stopAtBeginningOfMainSubprogram"].as_bool().unwrap_or(false);
                 self.dbg.client = Some(c);
                 self.dbg.state = DbgState::Starting;
-                let args = json!({
-                    "clientID": "ren",
-                    "clientName": "ren",
-                    "adapterID": plan.adapter.name,
-                    "pathFormat": "path",
-                    "linesStartAt1": true,
-                    "columnsStartAt1": true,
-                    "supportsVariableType": true,
-                    "supportsVariablePaging": false,
-                    "supportsRunInTerminalRequest": false,
-                    "locale": "en",
-                });
+                let args = init_args(&plan.adapter.name);
                 self.dbg.plan = Some(plan);
                 self.dbg.req("initialize", args, Req::Initialize);
             }
@@ -410,6 +514,9 @@ impl Editor {
         if let Some(mut c) = self.dbg.client.take() {
             c.kill();
         }
+        for mut c in self.dbg.others.drain(..) {
+            c.kill();
+        }
         self.dbg.state = DbgState::Idle;
         self.dbg.thread = None;
         self.dbg.frames.clear();
@@ -418,9 +525,14 @@ impl Editor {
         self.dbg.stopping = false;
         self.dbg.unverified.clear();
         self.dbg.bp_ids.clear();
+        self.dbg.ready = None;
         self.dbg.log(msg, 2);
+        if let Some(t) = self.dbg.post_task.take() {
+            self.run_post_task(&t);
+        }
         if std::mem::take(&mut self.dbg.restart) {
-            self.debug_start();
+            // A restart reuses the answers.
+            self.debug_go();
         }
     }
 
@@ -437,15 +549,267 @@ impl Editor {
                 self.dbg.progress.clear();
                 self.end_session("Build cancelled");
             }
+            DbgState::Task => {
+                self.dbg.tasks = None;
+                self.dbg.pending = None;
+                self.end_session("Cancelled while waiting for the preLaunchTask");
+            }
             _ if self.dbg.stopping || self.dbg.client.is_none() => {
                 self.end_session("Debug session ended");
             }
             _ => {
+                // Stopping the launched program ends its subprocesses too.
+                self.show_root();
                 self.dbg.stopping = true;
                 self.dbg
                     .req("disconnect", json!({ "terminateDebuggee": true }), Req::Disconnect);
             }
         }
+    }
+
+    /// The launched program's session back on screen, when a subprocess is.
+    fn show_root(&mut self) {
+        if self.dbg.client.as_ref().is_some_and(|c| c.attach.is_some()) {
+            if let Some(j) = self.dbg.others.iter().position(|c| c.attach.is_none()) {
+                self.show_other(j);
+            }
+        }
+    }
+
+    /// Background session `j` comes on screen; the one there goes to its place.
+    fn show_other(&mut self, j: usize) {
+        let c = self.dbg.others.remove(j);
+        if let Some(prev) = self.dbg.client.replace(c) {
+            self.dbg.others.insert(j, prev);
+        }
+        self.dbg.thread = None;
+        self.dbg.frames.clear();
+        self.dbg.vars.clear();
+        self.dbg.at = None;
+    }
+
+    /// The subprocess on screen ended: the launched program (or another
+    /// subprocess) comes back, still running.
+    fn subprocess_ended(&mut self) {
+        let Some(j) = self
+            .dbg
+            .others
+            .iter()
+            .position(|c| c.attach.is_none())
+            .or((!self.dbg.others.is_empty()).then_some(0))
+        else {
+            return self.end_session("Debug session ended");
+        };
+        if let Some(mut c) = self.dbg.client.take() {
+            c.kill();
+        }
+        self.dbg.client = Some(self.dbg.others.remove(j));
+        self.dbg.thread = None;
+        self.dbg.frames.clear();
+        self.dbg.vars.clear();
+        self.dbg.at = None;
+        self.dbg.state = DbgState::Running;
+    }
+
+    /// A subprocess to debug (debugpy's `debugpyAttach` event, or a
+    /// `startDebugging` request): a session of its own over the socket its
+    /// adapter names, configured in the background like the first one.
+    fn attach_subprocess(&mut self, cfg: &Value) {
+        let pid = cfg["subProcessId"].as_i64().unwrap_or(0);
+        let host = cfg["connect"]["host"].as_str().unwrap_or("127.0.0.1").to_string();
+        let Some(port) = cfg["connect"]["port"].as_u64().and_then(|p| u16::try_from(p).ok()) else {
+            return self.dbg.log(&format!("subprocess {}: no port to attach to", pid), 1);
+        };
+        let Some(adapter) = self.dbg.client.as_ref().map(|c| c.adapter.clone()) else {
+            return;
+        };
+        let mut args = cfg.clone();
+        args["request"] = json!("attach");
+        match Client::connect(adapter, &host, port) {
+            Ok(mut c) => {
+                c.attach = Some(args);
+                c.request("initialize", init_args(&c.adapter.name.clone()), Req::Initialize);
+                self.dbg.others.push(c);
+                self.dbg.log(&format!("attached to subprocess {}", pid), 2);
+            }
+            Err(e) => self
+                .dbg
+                .log(&format!("could not attach to subprocess {}: {}", pid, e), 1),
+        }
+    }
+
+    /// What an adapter asks of ren: `runInTerminal` (the program in a
+    /// terminal tab, as VS Code's integrated terminal) and `startDebugging`
+    /// (a subprocess to attach to).
+    fn reverse_request(&mut self, command: &str, args: &Value) -> Result<Value, String> {
+        match command {
+            "runInTerminal" => {
+                let mut cmd: Vec<String> = args["args"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect();
+                if args["argsCanBeInterpretedByShell"].as_bool().unwrap_or(false) {
+                    let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+                    cmd = vec![sh, "-c".into(), cmd.join(" ")];
+                }
+                let cwd = args["cwd"]
+                    .as_str()
+                    .map(PathBuf::from)
+                    .filter(|d| d.is_dir())
+                    .unwrap_or_else(|| self.tree.root.clone());
+                let env: Vec<(String, Option<String>)> = args["env"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string)))
+                    .collect();
+                let title = args["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("Debug");
+                let pid = self.term_run(&cmd, &cwd, &env, title)?;
+                self.dbg.debug_term = Some(pid);
+                if self.dbg.ready.is_some() {
+                    if let Some(t) = self.terms.iter_mut().find(|t| t.pid() == pid) {
+                        t.tap = Some(String::new());
+                    }
+                }
+                self.dbg.log(&format!("running in the terminal: {}", title), 2);
+                Ok(json!({ "processId": pid, "shellProcessId": pid }))
+            }
+            "startDebugging" => {
+                self.attach_subprocess(&args["configuration"]);
+                Ok(json!({}))
+            }
+            _ => Ok(json!({})),
+        }
+    }
+
+    /// Messages from the background sessions.
+    fn poll_others(&mut self) -> bool {
+        let mut changed = false;
+        let mut i = 0;
+        while i < self.dbg.others.len() {
+            let msgs = self.dbg.others[i].poll();
+            let generation = self.dbg.generation;
+            let mut it = msgs.into_iter();
+            let mut gone = false;
+            while let Some(m) = it.next() {
+                changed = true;
+                match self.on_background(i, m) {
+                    Bg::Stays => {}
+                    Bg::Gone => gone = true,
+                    Bg::Shown => {
+                        // On screen now: the rest of what it sent goes the usual way.
+                        for m in it.by_ref() {
+                            self.on_dap(m);
+                            if self.dbg.generation != generation {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if gone || self.dbg.generation != generation {
+                    break;
+                }
+            }
+            if self.dbg.generation != generation {
+                return true;
+            }
+            if !gone {
+                i += 1;
+            }
+        }
+        changed
+    }
+
+    fn on_background(&mut self, i: usize, m: DapMsg) -> Bg {
+        match m {
+            DapMsg::Closed => self.drop_other(i),
+            DapMsg::Request { seq, command, args } => {
+                let reply = self.reverse_request(&command, &args);
+                if let Some(c) = self.dbg.others.get_mut(i) {
+                    match reply {
+                        Ok(body) => c.respond(seq, &command, body),
+                        Err(e) => c.respond_error(seq, &command, &e),
+                    }
+                }
+                Bg::Stays
+            }
+            DapMsg::Event { event, body } => match event.as_str() {
+                "initialized" => {
+                    let bps: Vec<(PathBuf, BTreeSet<usize>)> = self.dbg.bps.values().cloned().collect();
+                    let c = &mut self.dbg.others[i];
+                    for (path, lines) in &bps {
+                        file_bps(c, path, lines);
+                    }
+                    c.request("setExceptionBreakpoints", json!({ "filters": [] }), Req::Other);
+                    if c.caps["supportsConfigurationDoneRequest"].as_bool().unwrap_or(true) {
+                        c.request("configurationDone", json!({}), Req::ConfigDone);
+                    }
+                    c.ready = true;
+                    Bg::Stays
+                }
+                "stopped" => {
+                    self.show_other(i);
+                    self.on_dap_event("stopped", body);
+                    Bg::Shown
+                }
+                "debugpyAttach" => {
+                    self.attach_subprocess(&body);
+                    Bg::Stays
+                }
+                "terminated" => self.drop_other(i),
+                "exited" => {
+                    let code = body["exitCode"].as_i64().unwrap_or(0);
+                    let who = if self.dbg.others[i].attach.is_some() {
+                        "Subprocess"
+                    } else {
+                        "Program"
+                    };
+                    self.dbg.log(&format!("{} exited (code {})", who, code), 2);
+                    Bg::Stays
+                }
+                "output" | "breakpoint" => {
+                    self.on_dap_event(&event, body);
+                    Bg::Stays
+                }
+                _ => Bg::Stays,
+            },
+            DapMsg::Response {
+                req,
+                success,
+                message,
+                body,
+            } => match req {
+                Req::Initialize => {
+                    let c = &mut self.dbg.others[i];
+                    c.caps = body;
+                    let args = c.attach.clone().unwrap_or(Value::Null);
+                    c.request("attach", args, Req::Attach);
+                    Bg::Stays
+                }
+                Req::Attach if !success => {
+                    self.dbg.log(&format!("subprocess: {}", message), 1);
+                    self.drop_other(i)
+                }
+                Req::SetBreakpoints(_) => {
+                    self.on_dap_response(req, success, message, body);
+                    Bg::Stays
+                }
+                _ => Bg::Stays,
+            },
+        }
+    }
+
+    /// Background session `i` is gone. When it was the launched program,
+    /// that's the end of the whole session.
+    fn drop_other(&mut self, i: usize) -> Bg {
+        let mut c = self.dbg.others.remove(i);
+        c.kill();
+        if c.attach.is_none() {
+            self.end_session("Debug session ended");
+        }
+        Bg::Gone
     }
 
     pub(crate) fn debug_restart(&mut self) {
@@ -586,6 +950,8 @@ impl Editor {
 
     pub fn debug_tick(&mut self) -> bool {
         let mut changed = self.install_tick();
+        changed |= self.task_tick();
+        changed |= self.server_ready_tick();
         let results: Vec<BuildResult> = self
             .dbg
             .build
@@ -633,22 +999,28 @@ impl Editor {
             changed = true;
             self.on_dap(m);
             if self.dbg.generation != generation {
-                break;
+                return changed;
             }
         }
-        changed
+        self.poll_others() || changed
     }
 
     fn on_dap(&mut self, m: DapMsg) {
         match m {
             DapMsg::Closed => {
-                if self.dbg.active() {
+                if self.dbg.client.as_ref().is_some_and(|c| c.attach.is_some()) {
+                    self.subprocess_ended();
+                } else if self.dbg.active() {
                     self.end_session("Debug session ended");
                 }
             }
-            DapMsg::Request { seq, command } => {
+            DapMsg::Request { seq, command, args } => {
+                let reply = self.reverse_request(&command, &args);
                 if let Some(c) = self.dbg.client.as_mut() {
-                    c.respond(seq, &command, json!({}));
+                    match reply {
+                        Ok(body) => c.respond(seq, &command, body),
+                        Err(e) => c.respond_error(seq, &command, &e),
+                    }
                 }
             }
             DapMsg::Event { event, body } => self.on_dap_event(&event, body),
@@ -754,11 +1126,20 @@ impl Editor {
                 };
                 if let Some(o) = body["output"].as_str() {
                     self.dbg.log(o, kind);
+                    // serverReadyAction watches these categories (not ones without).
+                    if body["category"].is_string() && matches!(cat, "console" | "stderr" | "stdout") {
+                        let o = o.to_string();
+                        self.server_ready_check(&o);
+                    }
                 }
             }
             "exited" => {
                 let code = body["exitCode"].as_i64().unwrap_or(0);
                 self.dbg.log(&format!("Program exited (code {})", code), 2);
+            }
+            "debugpyAttach" => self.attach_subprocess(&body),
+            "terminated" if self.dbg.client.as_ref().is_some_and(|c| c.attach.is_some()) => {
+                self.subprocess_ended();
             }
             "terminated" => {
                 if self.dbg.client.is_some() && !self.dbg.stopping {
@@ -788,11 +1169,21 @@ impl Editor {
     fn on_dap_response(&mut self, req: Req, success: bool, message: String, body: Value) {
         match req {
             Req::Initialize => {
+                let mut attach = None;
                 if let Some(c) = self.dbg.client.as_mut() {
                     c.caps = body;
+                    attach = c.attach.clone();
                 }
-                let args = self.dbg.plan.as_ref().map(|p| p.args.clone()).unwrap_or(Value::Null);
-                self.dbg.req("launch", args, Req::Launch);
+                match attach {
+                    Some(a) => self.dbg.req("attach", a, Req::Attach),
+                    None => {
+                        let (request, args) = match self.dbg.plan.as_ref() {
+                            Some(p) => (p.request.clone(), p.args.clone()),
+                            None => ("launch".to_string(), Value::Null),
+                        };
+                        self.dbg.req(&request, args, Req::Launch);
+                    }
+                }
             }
             Req::SetBreakpoints(path) => {
                 let key = path_key(&path);
@@ -1010,6 +1401,10 @@ impl Editor {
                 self.debug_start();
             }
             None | Some("start") | Some("run") => self.debug_start(),
+            Some("anyway") => match self.dbg.pending.take() {
+                Some(p) => self.go_plan(p),
+                None => self.error("Nothing waiting: :debug anyway launches after a preLaunchTask failed"),
+            },
             Some("stop") => self.debug_stop(),
             Some("restart") => self.debug_restart(),
             Some("panel") => self.dbg.visible = !self.dbg.visible,
@@ -1197,6 +1592,7 @@ impl Editor {
         let (label, color) = match d.state {
             DbgState::Idle => ("DEBUG", DIM),
             DbgState::Installing => ("INSTALLING", TYPE),
+            DbgState::Task => ("TASK", TYPE),
             DbgState::Building => ("BUILDING", TYPE),
             DbgState::Starting => ("STARTING", TYPE),
             DbgState::Running => ("RUNNING", STR),

@@ -8,11 +8,13 @@ mod fileops;
 mod git;
 mod highlight;
 mod icons;
+mod launch;
 mod lsp;
 mod markdown;
 mod render;
 mod screen;
 mod settings;
+mod tasks;
 mod term;
 mod tools;
 mod tree;
@@ -218,6 +220,7 @@ fn main() -> io::Result<()> {
     }
     let mut ed = Editor::new(arg, w, h);
     ed.check_recovery();
+    ed.start_workspace_file();
     run_app(ed)
 }
 

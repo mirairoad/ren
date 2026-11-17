@@ -156,6 +156,11 @@ impl Editor {
         self.projects.len()
     }
 
+    /// Which project is on screen (0-based, selector order).
+    pub fn project_index(&self) -> usize {
+        self.proj
+    }
+
     /// Folders of all open projects, in selector order.
     pub(crate) fn project_roots(&self) -> Vec<PathBuf> {
         (0..self.projects.len())

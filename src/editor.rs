@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[path = "debug_run.rs"]
+pub(crate) mod debug_run;
 #[path = "debug_ui.rs"]
 mod debug_ui;
 #[path = "files.rs"]
@@ -238,6 +240,10 @@ pub struct Layout {
     pub ed_r: u16,
     /// Height of the side panel (file tree / git): it runs past the bottom panel.
     pub side_h: u16,
+    /// The explorer's list: its first row (the search box is the row above)
+    /// and how many rows it has.
+    pub tree_top: u16,
+    pub tree_h: u16,
     /// The bottom panel sits under the editor only: from `dbg_x`, `dbg_w` wide.
     pub dbg_x: u16,
     pub dbg_w: u16,
@@ -366,6 +372,9 @@ pub struct Editor {
     md_cache: RefCell<Option<(MdKey, Vec<crate::markdown::Line>)>>,
     /// Columns of the status bar's Preview / Raw switch, while it's shown.
     pub md_chip: Cell<Option<(u16, u16)>>,
+    /// The name under the mouse while Ctrl is held, drawn as a link (VS
+    /// Code's go-to-definition look): (tab, line, start, end).
+    pub link: Option<(usize, usize, usize, usize)>,
 }
 
 pub const SPLASH_OPEN: usize = 1000;
@@ -529,6 +538,7 @@ impl Editor {
             proj_span: (0, 0),
             md_cache: RefCell::new(None),
             md_chip: Cell::new(None),
+            link: None,
         };
         ed.sessions = session::list_sessions(&ed.session_id);
         let errs = ed.load_settings();
@@ -664,6 +674,8 @@ impl Editor {
             ed_w,
             ed_r,
             side_h: total_h,
+            tree_top: TAB_H + 1,
+            tree_h: total_h.saturating_sub(1),
             dbg_x,
             dbg_w,
             dbg_y,
@@ -752,6 +764,7 @@ impl Editor {
                 if k.kind == KeyEventKind::Release {
                     return;
                 }
+                self.link = None;
                 self.hscroll_free = false;
                 self.on_key(k);
                 self.after(3);
@@ -905,6 +918,7 @@ impl Editor {
                 self.save(None);
             }
             KeyCode::Char('b') => self.toggle_tree(),
+            KeyCode::Char('e') => self.tree_search(),
             KeyCode::Char('k') => {
                 let d = self.tree.root.clone();
                 self.folder_picker(d, None, false);
@@ -991,7 +1005,7 @@ impl Editor {
     }
 
     fn tree_rows(&self) -> usize {
-        self.layout().side_h as usize
+        self.layout().tree_h as usize
     }
 
     fn tree_follow(&mut self) {
@@ -1004,7 +1018,62 @@ impl Editor {
         }
     }
 
+    /// The explorer's search box has the keys: typing filters the tree,
+    /// ↑/↓ move through what it found, Enter opens it, Esc empties the box
+    /// (again: back to the list). Other keys go to the list.
+    fn tree_search_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let mut q = self.tree.query.clone();
+        match k.code {
+            KeyCode::Char('u') if ctrl => q.clear(),
+            KeyCode::Char(c) if !ctrl => q.push(c),
+            KeyCode::Backspace => {
+                q.pop();
+            }
+            KeyCode::Esc if !q.is_empty() => q.clear(),
+            KeyCode::Esc | KeyCode::Tab => {
+                self.tree.typing = false;
+                return true;
+            }
+            KeyCode::Enter => {
+                if let Some(n) = self.tree.nodes.get(self.tree.sel) {
+                    let i = self.tree.sel;
+                    if n.is_dir {
+                        // A folder: out of the search, to that folder.
+                        let p = n.path.clone();
+                        self.tree.typing = false;
+                        self.tree.set_query("");
+                        self.tree.reveal(&p);
+                        self.tree_follow();
+                    } else {
+                        self.tree_activate(i);
+                    }
+                }
+                return true;
+            }
+            _ => return false,
+        }
+        self.tree.set_query(&q);
+        self.tree_follow();
+        true
+    }
+
+    /// Ctrl+E, a click on the search box: the explorer shown, its search box
+    /// taking the keys.
+    pub(crate) fn tree_search(&mut self) {
+        self.enter_edit();
+        if !self.tree.visible || self.git_active() {
+            self.git = None;
+            self.tree.visible = true;
+        }
+        self.focus = Focus::Tree;
+        self.tree.typing = true;
+    }
+
     fn tree_key(&mut self, k: KeyEvent) {
+        if self.tree.typing && self.tree_search_key(k) {
+            return;
+        }
         let n = self.tree.nodes.len();
         let page = self.tree_rows().max(1);
         match k.code {
@@ -1048,29 +1117,28 @@ impl Editor {
                 }
             }
             KeyCode::Char(':') => self.start_cmd(),
+            KeyCode::Esc if self.tree.searching() => self.tree.set_query(""),
             KeyCode::Esc => {
                 if !kitty() {
                     self.start_cmd();
                 }
             }
             KeyCode::Tab => self.focus = Focus::Editor,
-            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => self.tree_type_jump(c),
+            // Typing searches, as in VS Code's explorer.
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.tree.typing = true;
+                let q = format!("{}{}", self.tree.query, c);
+                self.tree.set_query(&q);
+            }
+            KeyCode::Backspace if self.tree.searching() => {
+                self.tree.typing = true;
+                let mut q = self.tree.query.clone();
+                q.pop();
+                self.tree.set_query(&q);
+            }
             _ => {}
         }
         self.tree_follow();
-    }
-
-    /// Typing a letter in the tree jumps to the next entry starting with it.
-    fn tree_type_jump(&mut self, c: char) {
-        let n = self.tree.nodes.len();
-        let lc = c.to_lowercase().next().unwrap_or(c);
-        for off in 1..=n {
-            let i = (self.tree.sel + off) % n;
-            if self.tree.nodes[i].name.to_lowercase().starts_with(lc) {
-                self.tree.sel = i;
-                return;
-            }
-        }
     }
 
     /// The selected tree entry as a workspace path (`/src/main.rs`).
@@ -2203,6 +2271,8 @@ impl Editor {
             "tree" => self.toggle_tree(),
             "project" | "proj" => self.project_command(&rest),
             "workspace" | "ws" => self.workspace_command(&rest),
+            // The answer to what a launch asked (`${input:…}`), see debug_run.rs.
+            "input" => self.input_answer(arg),
             "cd" => {
                 let target = rest
                     .first()
@@ -2516,6 +2586,34 @@ impl Editor {
         }
     }
 
+    /// The name under the mouse, when there's a language server to take
+    /// Ctrl+click to its definition: (tab, line, start, end).
+    fn link_at(&self, x: u16, y: u16, l: &Layout) -> Option<(usize, usize, usize, usize)> {
+        if self.is_splash() || self.buf().md_view || self.lsp_lang(self.cur).is_none() {
+            return None;
+        }
+        let (cx, cy) = self.pos_from_mouse(x, y, l);
+        let line = self.buf().lines.get(cy)?;
+        // On the character itself, not past the end of the line.
+        let (back, _) = self.pos_from_mouse(x.saturating_sub(1), y, l);
+        if cx >= line.len() || (cx > 0 && back == cx && x > l.text_x) {
+            return None;
+        }
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        if !word(line[cx]) {
+            return None;
+        }
+        let mut s = cx;
+        while s > 0 && word(line[s - 1]) {
+            s -= 1;
+        }
+        let mut e = cx;
+        while e < line.len() && word(line[e]) {
+            e += 1;
+        }
+        Some((self.cur, cy, s, e))
+    }
+
     fn pos_from_mouse(&self, x: u16, y: u16, l: &Layout) -> Pos {
         let b = self.buf();
         let ly = if y < l.top {
@@ -2617,6 +2715,12 @@ impl Editor {
         let over_tree = self.tree.visible && x < l.tree_w && in_side_rows;
         let on_sep = self.tree.visible && x == l.tree_w && in_side_rows;
         let over_dbg = l.dbg_h > 0 && y >= l.dbg_y && y < l.dbg_y + l.dbg_h && x >= l.dbg_x;
+        let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
+        self.link = if ctrl && in_text_rows && x >= l.text_x && !over_dbg && m.kind == MouseEventKind::Moved {
+            self.link_at(x, y, &l)
+        } else {
+            None
+        };
         // Panel hit boxes are in panel coordinates.
         let px = x.saturating_sub(l.dbg_x);
         let hover = if over_dbg { self.panel_hit(px, y) } else { None };
@@ -2678,7 +2782,7 @@ impl Editor {
                 self.last_edit = None;
                 self.hscroll_free = false;
                 if y < l.top {
-                    if y == TAB_H - 1 && x >= self.proj_span.0 && x < self.proj_span.1 {
+                    if x >= self.proj_span.0 && x < self.proj_span.1 {
                         return self.project_menu();
                     }
                     if let Some((_, _, i, close_x)) = self.tab_at(x, y) {
@@ -2708,10 +2812,14 @@ impl Editor {
                     self.diff_click(y, m.modifiers.contains(KeyModifiers::SHIFT));
                     return;
                 }
+                if over_tree && y < l.tree_top {
+                    return self.tree_search();
+                }
                 if over_tree {
                     self.enter_edit();
                     self.focus = Focus::Tree;
-                    let i = self.tree.scroll + (y - l.top) as usize;
+                    self.tree.typing = false;
+                    let i = self.tree.scroll + (y - l.tree_top) as usize;
                     if i < self.tree.nodes.len() {
                         self.tree.sel = i;
                         if self.clicks >= 2 || self.tree.nodes[i].is_dir {
