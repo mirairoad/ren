@@ -212,6 +212,9 @@ Based on the Python project test (see Log, 2026-11-11).
 
 ## Log
 
+### 2026-11-17: Release 0.4.3
+- **Version 0.4.3** (`Cargo.toml`, the README's tag example). New since 0.4.2, all in the entries below: launch.json and tasks.json as in VS Code, the side panel's search box, indent guides and problem counts, inline diagnostics, the Ctrl link underline, and JavaScript-style workspace files with a template for a missing one.
+
 ### 2026-11-16: launch.json 1:1 with VS Code
 - **Goal (from the user): a `.vscode/launch.json` that works in VS Code works the same in ren.** VS Code doesn't send launch.json as written: it applies the OS block, substitutes variables, asks for inputs, runs the `preLaunchTask`, and the debugger's extension fills in its defaults. ren now does each step, written from their source (VS Code `debugUtils.ts`, `variableResolver.ts`, `debugTaskRunner.ts`, `taskConfiguration.ts`, `terminalTaskSystem.ts`, `debug-server-ready`; the Python Debugger extension's resolvers; vscode-go's `goDebugConfiguration.ts`; CodeLLDB; cpptools and gdb's / lldb-dap's own DAP), in `launch.rs`, `tasks.rs` and `debug_run.rs`.
 - **List**: `launch` and `attach` configurations, VS Code's order (`presentation.group` / `order`, `hidden` left out). **OS blocks** (`windows` / `linux` / `osx`, shallow like VS Code's). **Variables**: the whole set (`workspaceFolder:name` is another open project; `config:` reads `.vscode/settings.json`), in keys too, recursive, unknown ones kept, unresolvable ones stop the launch with VS Code's message. **Inputs**: `promptString` on the `:` line (`:input <value>`, prefilled with the last answer or the default, its description at the right), `pickString` and `${command:pickProcess}` as lists; asked once per launch, kept for a restart, `Esc` cancels.
